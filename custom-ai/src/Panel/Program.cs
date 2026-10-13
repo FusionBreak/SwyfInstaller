@@ -330,8 +330,9 @@ public static class Program
             var settings = store.Merge(input);
             if (settings.UseManifestDeX) { await manifest.RequireAvailable(ctx.RequestAborted); settings = manifest.Effective(settings); }
             var body = JsonNode.Parse("""
-                {"messages":[{"role":"user","content":"Reply in English with a short greeting. Set trust_percent to 50 and emotion to NEUTRAL."}],"max_tokens":128,"response_format":{"type":"json_schema","json_schema":{"name":"caller_turn","strict":true,"schema":{"type":"object","properties":{"dialogue":{"type":"string"},"trust_percent":{"type":"integer","minimum":0,"maximum":100},"emotion":{"type":"string","enum":["TRUSTING","SUSPICIOUS","ANGRY","NEUTRAL"]}},"required":["dialogue","trust_percent","emotion"],"additionalProperties":false}}}}
+                {"messages":[{"role":"user","content":"Reply in English with a short greeting. Set trust_percent to 50, emotion to NEUTRAL, and completed_objectives to an empty array."}],"max_tokens":128,"response_format":{"type":"json_schema","json_schema":{"name":"gameplay_caller_turn","strict":true,"schema":{"type":"object","properties":{"dialogue":{"type":"string"},"trust_percent":{"type":"integer","minimum":0,"maximum":100},"emotion":{"type":"string","enum":["TRUSTING","SUSPICIOUS","ANGRY","NEUTRAL"]},"completed_objectives":{"type":"array","items":{"type":"string"}}},"required":["dialogue","trust_percent","emotion","completed_objectives"],"additionalProperties":false}}}}
                 """)!.AsObject();
+            GameProbe.ApplyInstalledSchema(body, startup.ConfigPath);
             // Match the normal caller defaults so a passing test also exercises model compatibility.
             body["temperature"] = 0.9;
             body["top_p"] = 0.95;
@@ -339,12 +340,7 @@ public static class Program
             var response = await provider.Complete(body, settings, false, ctx.RequestAborted);
             try
             {
-                using var doc = JsonDocument.Parse(Provider.ExtractText(response));
-                var root = doc.RootElement;
-                if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != 3 ||
-                    root.GetProperty("dialogue").ValueKind != JsonValueKind.String ||
-                    !root.GetProperty("trust_percent").TryGetInt32(out var trust) || trust is < 0 or > 100 ||
-                    root.GetProperty("emotion").GetString() is not ("TRUSTING" or "SUSPICIOUS" or "ANGRY" or "NEUTRAL")) throw new JsonException();
+                GameProbe.ValidateResponse(body, Provider.ExtractText(response));
             }
             catch { throw new ApiFailure(502, "schema", "Connected, but the model did not follow the game response schema. Try another model or output mode."); }
             return Results.Json(new { ok = true, elapsedMs = watch.ElapsedMilliseconds, message = "Connection and game response schema verified." });

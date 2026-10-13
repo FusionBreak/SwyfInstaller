@@ -4,6 +4,7 @@
     <AssemblyName>SWYF.CustomAI.Panel</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="JsonSchema.Net" Version="7.3.4" />
     <EmbeddedResource Include="index.html" />
   </ItemGroup>
 </Project>

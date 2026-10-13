@@ -204,8 +204,11 @@ namespace Swyf.CustomAI
 
         public static bool TryComplete(JObject body, CancellationToken cancellation, bool background, out UniTask<JObject> result)
         {
-            EnsureInitialized();
             result = default;
+            // Prompt/version lookups are game control requests, not text generation.
+            if (body["resolve_prompt_version"] is JValue control && control.Type == JTokenType.Boolean && control.Value<bool>())
+                return false;
+            EnsureInitialized();
             if (!ReadEnabled()) return false;
             if (!NetworkServer.active || !NetworkServer.listen)
             { result = UniTask.FromException<JObject>(new InvalidOperationException("The custom provider only runs on the lobby host.")); return true; }
@@ -213,6 +216,13 @@ namespace Swyf.CustomAI
             { result = UniTask.FromException<JObject>(new IOException("The custom AI panel is unavailable; press F8 to reopen it.")); return true; }
             result = instance.Complete(body, cancellation, background);
             return true;
+        }
+
+        public static void PrepareConversation(object options)
+        {
+            // Use the game's shipped prompt path when text generation belongs to this mod.
+            if (!ReadEnabled()) return;
+            options.GetType().GetProperty("GameplayRoute")!.SetValue(options, "openrouter", null);
         }
 
         private UniTask<JObject> Complete(JObject body, CancellationToken cancellation, bool background)

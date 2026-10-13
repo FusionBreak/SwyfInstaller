@@ -115,6 +115,8 @@ from [Connected applications](https://manifestdex.com/account/connections).
    **Delete saved API key** removes it.
 5. Click **Test Connection**. This uses the form's current values and checks
    that the response matches the game schema. It does not save the form.
+   Current builds read the installed game's dialogue schema on each test,
+   including fields added by game updates. Older builds use the bundled probe.
    Requests may incur provider charges.
 6. Enable **Use custom provider** and click **Save Settings**.
 7. Host a lobby and start a call. New requests use the saved settings; an
@@ -190,6 +192,12 @@ plaintext.** Never share your installed `CustomAI` folder, backups, game logs,
 or modified game DLLs.
 
 ## Troubleshooting
+
+Custom AI v1.1.1 supports Playtest build **25909758**. With custom AI enabled,
+prompt preparation uses the game's shipped local rules; turning custom AI off
+preserves the original game route. The hosted service accepts bounded caller
+schema additions and validates replies against the full game schema. Core API
+or protocol changes may still require another update.
 
 - **F8 does nothing** — close the game, press **Update** (or re-run
   **Install Custom AI.cmd** for manual installs), start the game again.

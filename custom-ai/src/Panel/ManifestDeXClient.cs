@@ -48,7 +48,9 @@ public sealed class ManifestDeXClient:IDisposable
             if(json is null)throw new JsonException();
             return json;
         }
-        catch(Exception e) when(e is HttpRequestException or TaskCanceledException or JsonException){throw new ApiFailure(503,"manifestdex","Cannot reach ManifestDeX AI. Your private provider settings are preserved.");}
+        catch(HttpRequestException e){throw new ApiFailure(503,"manifestdex","Cannot reach ManifestDeX AI ("+e.HttpRequestError+(e.InnerException is System.Net.Sockets.SocketException socket?" / "+socket.SocketErrorCode:"")+"). Your private provider settings are preserved.");}
+        catch(TaskCanceledException){throw new ApiFailure(503,"manifestdex","ManifestDeX AI connection timed out. Your private provider settings are preserved.");}
+        catch(JsonException){throw new ApiFailure(503,"manifestdex","ManifestDeX AI returned an invalid response. Your private provider settings are preserved.");}
     }
     public async Task<object> Status(CancellationToken ct)
     {

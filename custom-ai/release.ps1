@@ -6,6 +6,7 @@ param(
     [switch]$Draft
 )
 $ErrorActionPreference = 'Stop'
+$gitTag = "custom-ai-$Tag"
 if ([string]::IsNullOrWhiteSpace($GameDir)) { throw 'Pass -GameDir or set SWYF_GAME_DIR to your game installation folder.' }
 Push-Location $PSScriptRoot
 $previousGameDir = $env:SWYF_GAME_DIR
@@ -37,12 +38,12 @@ try {
         $repository = gh repo view $origin --json nameWithOwner --jq .nameWithOwner
         if ($LASTEXITCODE -ne 0 -or !$repository) { throw 'Could not resolve the GitHub origin repository.' }
         # Never move an existing release tag, locally or remotely.
-        git show-ref --verify --quiet "refs/tags/$Tag"
+        git show-ref --verify --quiet "refs/tags/$gitTag"
         if ($LASTEXITCODE -eq 0) {
-            $tagCommit = git rev-parse "$Tag^{commit}"
+            $tagCommit = git rev-parse "$gitTag^{commit}"
             if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $head) { throw 'The local tag points to another commit.' }
         } elseif ($LASTEXITCODE -ne 1) { throw 'Could not inspect the local tag.' }
-        $remoteTag = @(git ls-remote origin "refs/tags/$Tag" "refs/tags/$Tag^{}")
+        $remoteTag = @(git ls-remote origin "refs/tags/$gitTag" "refs/tags/$gitTag^{}")
         if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the remote tag.' }
         if ($remoteTag.Count) {
             $peeled = @($remoteTag | Where-Object { $_.EndsWith('^{}') })
@@ -72,29 +73,29 @@ try {
     "$hash  $asset" | Set-Content -LiteralPath "$path.sha256" -Encoding ascii
     if ($BuildOnly) { Write-Output "Build and tests passed: $path (no tag, push, or release created)"; return }
 
-    git show-ref --verify --quiet "refs/tags/$Tag"
+    git show-ref --verify --quiet "refs/tags/$gitTag"
     if ($LASTEXITCODE -eq 1) {
-        git tag -a $Tag -m "Release $Tag" $head
+        git tag -a $gitTag -m "Release $gitTag" $head
         if ($LASTEXITCODE -ne 0) { throw 'Could not create the tag.' }
     } elseif ($LASTEXITCODE -ne 0) { throw 'Could not inspect the local tag.' }
-    git push origin "refs/tags/${Tag}:refs/tags/${Tag}"
+    git push origin "refs/tags/${gitTag}:refs/tags/${gitTag}"
     if ($LASTEXITCODE -ne 0) { throw 'Tag push failed; no release was published.' }
 
-    $release = gh release view $Tag --repo $repository --json isDraft --jq .isDraft 2>$null
+    $release = gh release view $gitTag --repo $repository --json isDraft --jq .isDraft 2>$null
     if ($LASTEXITCODE -ne 0) {
         $flags = @()
         if ($Tag.Contains('-')) { $flags += '--prerelease' }
-        gh release create $Tag --repo $repository --verify-tag --draft --notes-file $NotesFile --title "SWYF Custom AI $Tag" @flags
+        gh release create $gitTag --repo $repository --verify-tag --draft --notes-file $NotesFile --title "SWYF Custom AI $Tag" @flags
         if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release. The tag was pushed; rerun this command to retry.' }
         $release = 'true'
     }
-    gh release upload $Tag $path "$path.sha256" --repo $repository --clobber
+    gh release upload $gitTag $path "$path.sha256" --repo $repository --clobber
     if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed. Rerun the same command to retry; a newly created release remains a draft.' }
     if ($release -eq 'true' -and !$Draft) {
-        gh release edit $Tag --repo $repository --draft=false
+        gh release edit $gitTag --repo $repository --draft=false --latest=false
         if ($LASTEXITCODE -ne 0) { throw 'Assets uploaded, but publishing the draft failed. Rerun to retry.' }
     }
-    gh release view $Tag --repo $repository --json url --jq .url
+    gh release view $gitTag --repo $repository --json url --jq .url
     if ($LASTEXITCODE -ne 0) { throw 'Release uploaded, but its URL could not be retrieved.' }
 } finally {
     $env:SWYF_GAME_DIR = $previousGameDir

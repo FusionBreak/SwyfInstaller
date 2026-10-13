@@ -54,6 +54,15 @@ public static class Compatibility
                 r.DeclaringType.FullName == "KolkataApi" && r.Name == complete.Name).ToArray();
         if (callers.Length == 0 || callers.Any(i => ((MethodReference)i.Operand).FullName != complete.FullName))
             Fail("The shared AI request contract has changed.");
+        var freeze = Type(ai, "AIConversation").Methods.SingleOrDefault(m => m.Name == "FreezePromptAsync");
+        if (freeze != null)
+        {
+            Method(Type(ai, "AIConversation"), "FreezePromptAsync", "Cysharp.Threading.Tasks.UniTask", "AIConversationTurnOptions", "System.Threading.CancellationToken");
+            var options = Type(ai, "AIConversationTurnOptions");
+            Method(options, "get_GameplayRoute", "System.String");
+            var setter = Method(options, "set_GameplayRoute", "System.Void", "System.String");
+            if (!setter.IsPublic) Fail("GameplayRoute must have a public setter.");
+        }
 
         foreach (var name in new[] { "MainMenuToolkitController", "PauseMenuToolkitController" })
         {

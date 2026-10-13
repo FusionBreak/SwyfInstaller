@@ -43,7 +43,7 @@ public static class Program
                 Process.GetProcessesByName("SWYF.CustomAI.Panel").Length > 0))
                 throw new InvalidOperationException("Close the game first.");
             Manifest? manifest = File.Exists(manifestPath) ? JsonSerializer.Deserialize<Manifest>(File.ReadAllText(manifestPath)) : null;
-            if (manifest != null && (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6) || manifest.Files == null || manifest.Files.Length != 2 ||
+            if (manifest != null && (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7) || manifest.Files == null || manifest.Files.Length != 2 ||
                 manifest.Files.Any(x => x == null || !GameFiles.Contains(x.Name) || !ValidHash(x.OriginalHash) || !ValidHash(x.PatchedHash)) ||
                 manifest.Files.Select(x => x.Name).Distinct().Count() != 2))
                 throw new InvalidOperationException("Invalid installation manifest.");
@@ -85,8 +85,8 @@ public static class Program
                 {
                     var backup = Backup(record); RequireHash(backup, record.OriginalHash);
                     sources[name] = backup;
-                    VerifyPatched(live, name == "ScriptsAssDef.dll" ? (manifest!.Version == 1 ? 2 : 3) : (manifest!.Version == 4 ? 4 : 2),
-                        manifest.Version == 5 ? "ConfigureBackend" : manifest.Version == 6 ? "EnsureInitialized" : null);
+                    VerifyPatched(live, name == "ScriptsAssDef.dll" ? (manifest!.Version == 1 ? 2 : 3) : (manifest!.Version == 4 ? 4 : manifest.Version == 7 ? CurrentAiHookCount(live) : 2),
+                        manifest.Version == 5 ? "ConfigureBackend" : manifest.Version >= 6 ? "EnsureInitialized" : null);
                 }
                 else { Compatibility.RequireUnpatched(live); sources[name] = live; needsRepair = true; }
             }
@@ -115,7 +115,7 @@ public static class Program
                     File.Copy(sources[name], backup);
                 RequireHash(backup, originalHash);
                 Patch(backup, Path.Combine(stage, name), bridge, managed);
-                VerifyPatched(Path.Combine(stage, name), name == "ScriptsAssDef.dll" ? 3 : 2, "EnsureInitialized");
+                VerifyPatched(Path.Combine(stage, name), name == "ScriptsAssDef.dll" ? 3 : CurrentAiHookCount(backup), "EnsureInitialized");
                 records.Add(new(name, originalHash, Hash(Path.Combine(stage, name))));
             }
             // Catch a concurrent Steam update before touching live files.
@@ -135,7 +135,7 @@ public static class Program
                 AtomicCopy(bridge, Path.Combine(managed, BridgeName));
                 foreach (var name in GameFiles) AtomicCopy(Path.Combine(stage, name), Path.Combine(managed, name));
                 File.Delete(legacyConfig);
-                var installed = new Manifest(6, records.ToArray()) { Extra = manifest?.Extra };
+                var installed = new Manifest(7, records.ToArray()) { Extra = manifest?.Extra };
                 File.WriteAllText(manifestPath + ".tmp", JsonSerializer.Serialize(installed, new JsonSerializerOptions { WriteIndented = true }));
                 File.Move(manifestPath + ".tmp", manifestPath, true);
             }
@@ -202,6 +202,14 @@ public static class Program
             var persist = awake.Body.Instructions.Single(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "DontDestroyOnLoad");
             var awakeIl = awake.Body.GetILProcessor();
             awakeIl.InsertAfter(persist, awakeIl.Create(OpCodes.Call, Import("EnsureInitialized")));
+            var freeze = module.Types.Single(t => t.FullName == "AIConversation").Methods.SingleOrDefault(m => m.Name == "FreezePromptAsync");
+            if (freeze != null)
+            {
+                ExpandBranches(freeze);
+                var freezeIl = freeze.Body.GetILProcessor(); var start = freeze.Body.Instructions[0];
+                freezeIl.InsertBefore(start, freezeIl.Create(OpCodes.Ldarg_1));
+                freezeIl.InsertBefore(start, freezeIl.Create(OpCodes.Call, Import("PrepareConversation")));
+            }
         }
         else
         {
@@ -224,6 +232,12 @@ public static class Program
             refreshIl.InsertAfter(originalRefresh, instance); refreshIl.InsertAfter(instance, refreshCall);
         }
         assembly.Write(output);
+    }
+
+    private static int CurrentAiHookCount(string path)
+    {
+        using var assembly = AssemblyDefinition.ReadAssembly(path);
+        return assembly.MainModule.Types.Single(t => t.Name == "AIConversation").Methods.Any(m => m.Name == "FreezePromptAsync") ? 3 : 2;
     }
 
     public static void VerifyPatched(string path, int expected, string? startupHook = null)

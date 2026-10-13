@@ -16,6 +16,21 @@ int passed = 0;
 void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); passed++; }
 async Task Failure(Func<Task> task, string code)
 { try { await task(); throw new Exception("Expected " + code); } catch (ApiFailure e) { Check(e.Code == code, code); } }
+var probeConfig=Path.Combine(output,"probe-game","CustomAI","settings.json");
+var probeRequest=new JsonObject();
+GameProbe.ApplyInstalledSchema(probeRequest,probeConfig);
+Check(probeRequest.Count==0,"missing game schema retains bundled probe for older games");
+var probeSchemaPath=Path.Combine(output,"probe-game","Scam With Your Friends_Data","StreamingAssets","kolkata-json","core-prompts","system-prompt.schema.json");
+Directory.CreateDirectory(Path.GetDirectoryName(probeSchemaPath)!);
+File.WriteAllText(probeSchemaPath,"""{"type":"json_schema","json_schema":{"name":"gameplay_caller_turn","schema":{"type":"object","properties":{"dialogue":{"type":"string"},"comedy":{"type":"number","minimum":0,"maximum":1}},"required":["dialogue","comedy"],"additionalProperties":false}}}""");
+GameProbe.ApplyInstalledSchema(probeRequest,probeConfig);
+GameProbe.ValidateResponse(probeRequest,"""{"dialogue":"Hello","comedy":0.5}""");
+Check(true,"probe reads installed schema and accepts its new field");
+foreach(var invalid in new[]{"""{"dialogue":"Hello"}""","""{"dialogue":"Hello","comedy":2}""","""{"dialogue":"Hello","comedy":"zero"}""","""{"dialogue":"Hello","comedy":0,"comedy":1}"""}){
+ try{GameProbe.ValidateResponse(probeRequest,invalid);throw new Exception("Invalid probe response accepted");}catch(JsonException){Check(true,"installed schema rejects missing, out-of-range, wrong-type or duplicate fields");}
+}
+File.WriteAllText(probeSchemaPath,"broken schema");
+try{GameProbe.ApplyInstalledSchema(probeRequest,probeConfig);throw new Exception("Broken schema accepted");}catch(ApiFailure e){Check(e.Code=="game_schema","updated invalid file fails rather than reusing a stale schema");}
 var builder = WebApplication.CreateBuilder(); builder.Logging.ClearProviders();
 builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, 0));
 var fake = builder.Build();
@@ -48,7 +63,9 @@ fake.MapPost("/{**path}", async (HttpContext ctx) =>
     if (path.Contains("invalid")) { await ctx.Response.WriteAsync("broken"); return; }
     if (path.Contains("oversize")) { await ctx.Response.WriteAsync(new string('x', Provider.MaxResponse + 10)); return; }
     if (path.Contains("wrong-schema")) { await ctx.Response.WriteAsJsonAsync(Response("{\"dialogue\":\"hi\"}")); return; }
-    await ctx.Response.WriteAsJsonAsync(Response(greeting));
+    var content = JsonNode.Parse(greeting)!;
+    if (observed?["response_format"]?["json_schema"]?["name"]?.ToString() == "gameplay_caller_turn") content["completed_objectives"] = path.Contains("bad-objectives") ? new JsonArray(42) : new JsonArray();
+    await ctx.Response.WriteAsJsonAsync(Response(content.ToJsonString()));
 });
 await fake.StartAsync();
 var url = fake.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
@@ -135,6 +152,7 @@ Check((await client.PutAsJsonAsync("/api/config", form)).IsSuccessStatusCode, "s
 Check(!(await client.GetStringAsync("/api/config")).Contains("saved-secret"), "HTTP config masks API key");
 Check((await client.PostAsJsonAsync("/api/test", form)).IsSuccessStatusCode, "connection test validates real schema");
 Check((await client.PostAsJsonAsync("/api/test", form with { BaseUrl = url + "/wrong-schema" })).StatusCode == HttpStatusCode.BadGateway, "test rejects invalid gameplay schema");
+Check((await client.PostAsJsonAsync("/api/test", form with { BaseUrl = url + "/bad-objectives" })).StatusCode == HttpStatusCode.BadGateway, "test rejects non-string completed objectives");
 Check((await client.GetStringAsync("/api/config")).Contains("/v1"), "test does not save draft settings");
 client.DefaultRequestHeaders.Remove("X-CustomAI-Token"); client.DefaultRequestHeaders.Add("X-CustomAI-Token", internalToken);
 Check((await client.GetFromJsonAsync<JsonObject>("/internal/status"))!["state"]!.GetValue<string>() == "success", "game status reflects saved provider test");
@@ -185,6 +203,10 @@ void CheckStandardHooks(string message)
 {
     using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(legacyAssemblyPath);
     var api = assembly.MainModule.Types.Single(t => t.Name == "KolkataApi");
+    var freeze = assembly.MainModule.Types.Single(t => t.Name == "AIConversation").Methods.SingleOrDefault(m => m.Name == "FreezePromptAsync");
+    if (freeze != null) Check(freeze.Body.Instructions[0].OpCode == Mono.Cecil.Cil.OpCodes.Ldarg_1 &&
+        freeze.Body.Instructions[1].Operand is Mono.Cecil.MethodReference hook && hook.Name == "PrepareConversation" && hook.DeclaringType.FullName == "Swyf.CustomAI.Runtime",
+        "current prompt preparation starts with the local-provider routing hook");
     Check(api.Methods.Single(m => m.Name == "Awake").Body.Instructions.Count(i => i.Operand is Mono.Cecil.MethodReference m &&
         m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name == "EnsureInitialized") == 1 &&
         !assembly.MainModule.GetMemberReferences().Any(m => m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name is "ConfigureBackend" or "SkipAuth"), message);
@@ -199,6 +221,9 @@ foreach (var legacyVersion in new[] { 4, 5 })
         using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(legacyAssemblyPath, new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
         var module = assembly.MainModule;
         var api = module.Types.Single(t => t.Name == "KolkataApi");
+        var freeze = module.Types.Single(t => t.Name == "AIConversation").Methods.SingleOrDefault(m => m.Name == "FreezePromptAsync");
+        if (freeze != null && freeze.Body.Instructions.Any(i => i.Operand is Mono.Cecil.MethodReference m && m.Name == "PrepareConversation"))
+        { freeze.Body.Instructions.RemoveAt(0); freeze.Body.Instructions.RemoveAt(0); }
         var awake = api.Methods.Single(m => m.Name == "Awake");
         var initialize = awake.Body.Instructions.Single(i => i.Operand is Mono.Cecil.MethodReference m && m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name == "EnsureInitialized");
         var runtime = ((Mono.Cecil.MethodReference)initialize.Operand).DeclaringType;
@@ -214,7 +239,15 @@ foreach (var legacyVersion in new[] { 4, 5 })
         {
             foreach (var getter in new[] { "get_BackendAuthenticated", "get_LobbyAuthenticated" })
             {
-                var method = api.Methods.Single(m => m.Name == getter);
+                // Recreate removed legacy getters only in the disposable migration fixture.
+                var method = api.Methods.SingleOrDefault(m => m.Name == getter);
+                if (method == null)
+                {
+                    method = new Mono.Cecil.MethodDefinition(getter, Mono.Cecil.MethodAttributes.Public, module.TypeSystem.Boolean);
+                    api.Methods.Add(method);
+                    method.Body.Instructions.Add(Mono.Cecil.Cil.Instruction.Create(Mono.Cecil.Cil.OpCodes.Ldc_I4_0));
+                    method.Body.Instructions.Add(Mono.Cecil.Cil.Instruction.Create(Mono.Cecil.Cil.OpCodes.Ret));
+                }
                 var first = method.Body.Instructions[0];
                 var il = method.Body.GetILProcessor();
                 il.InsertBefore(first, il.Create(Mono.Cecil.Cil.OpCodes.Call, new Mono.Cecil.MethodReference("SkipAuth", module.TypeSystem.Boolean, runtime)));
@@ -234,7 +267,7 @@ foreach (var legacyVersion in new[] { 4, 5 })
     File.WriteAllText(gameConfig, "disable_kolkata_api = true\n");
     Check(Installer.Main(["install", game, dist]) == 0 && Installer.Main(["verify", game]) == 0, $"version {legacyVersion} test installation migrates to current hooks");
     var migratedManifest = JsonNode.Parse(File.ReadAllText(legacyManifestPath))!;
-    Check(migratedManifest["Version"]!.GetValue<int>() == 6 && migratedManifest["LegacyMetadata"]?["mode"]?.GetValue<string>() == "preserved" &&
+    Check(migratedManifest["Version"]!.GetValue<int>() == 7 && migratedManifest["LegacyMetadata"]?["mode"]?.GetValue<string>() == "preserved" &&
         !File.Exists(gameConfig) && File.ReadAllText(privateSettings) == privateSettingsText,
         $"version {legacyVersion} migration removes obsolete config and preserves private settings and manifest metadata");
     CheckStandardHooks($"version {legacyVersion} migration removes backend and authentication overrides");
@@ -352,6 +385,12 @@ using(var pairing=new ManifestDeXClient(Path.Combine(output,"rate-limit","settin
  Check(handler.Calls==1,"repeated pairing clicks do not resend during cooldown");
 }
 
+foreach(var reason in new[]{HttpRequestError.NameResolutionError,HttpRequestError.SecureConnectionError,HttpRequestError.ConnectionError})
+using(var handler=new NetworkFailureHandler(reason))
+using(var networkClient=new ManifestDeXClient(Path.Combine(output,"network-"+reason,"settings.json"),provider,handler)){
+    var result=JsonSerializer.SerializeToNode(await networkClient.Status(default))!;
+    Check(result["signInAvailable"]!.GetValue<bool>()==false && result["notice"]!.GetValue<string>().Contains(reason.ToString()) && result["notice"]!.GetValue<string>().Contains("AccessDenied") && !result.ToJsonString().Contains("private-exception-detail"),"network failure identifies "+reason+" without exposing raw exception details");
+}
 Console.WriteLine($"ALL {passed} CHECKS PASSED");
 File.WriteAllText(Path.Combine(output, "result.txt"), $"{passed} checks passed at {DateTimeOffset.UtcNow:O}");
 sealed class PairingHandler:HttpMessageHandler
@@ -375,4 +414,9 @@ sealed class RateLimitedPairingHandler:HttpMessageHandler
   var response=new HttpResponseMessage(HttpStatusCode.TooManyRequests){Content=new StringContent("""{"error":"rate_limit","message":"Too many requests."}""",Encoding.UTF8,"application/json")};
   response.Headers.RetryAfter=new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMinutes(10));return response;
  }
+}
+
+sealed class NetworkFailureHandler(HttpRequestError reason):HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)=>throw new HttpRequestException(reason,"private-exception-detail",new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.AccessDenied));
 }

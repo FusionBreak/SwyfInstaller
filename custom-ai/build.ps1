@@ -5,6 +5,8 @@ Push-Location $PSScriptRoot
 try {
     dotnet build src/Bridge/Bridge.csproj -c Release "-p:GameDir=$GameDir" --nologo
     if ($LASTEXITCODE) { throw 'Bridge build failed.' }
+    dotnet run --project tests/BridgeRouting/BridgeRouting.csproj -c Release "-p:GameDir=$GameDir"
+    if ($LASTEXITCODE) { throw 'Bridge request routing check failed.' }
     dotnet publish src/Panel/Panel.csproj -c Release -r win-x64 --self-contained false -o dist/panel --nologo
     if ($LASTEXITCODE) { throw 'Panel build failed.' }
     dotnet publish tools/Installer/Installer.csproj -c Release -r win-x64 --self-contained false -o dist/installer --nologo
