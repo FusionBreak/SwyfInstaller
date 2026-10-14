@@ -353,6 +353,7 @@ public static class Program
             if (settings.UseManifestDeX) settings = manifest.Effective(settings);
             var bytes = await Provider.ReadBounded(ctx.Request.Body, Provider.MaxRequest, ctx.RequestAborted);
             var body = JsonNode.Parse(bytes) as JsonObject ?? throw new JsonException();
+            body = GameProbe.PrepareCompletion(body, startup.ConfigPath);
             return Results.Json(await provider.Complete(body, settings, ctx.Request.Headers["X-CustomAI-Background"] == "1", ctx.RequestAborted));
         });
         await app.StartAsync();

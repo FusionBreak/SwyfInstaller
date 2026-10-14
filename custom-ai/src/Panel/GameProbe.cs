@@ -10,6 +10,7 @@ public static class GameProbe
     {
         var game = Path.GetDirectoryName(Path.GetDirectoryName(configPath))!;
         var path = Path.Combine(game, "Scam With Your Friends_Data", "StreamingAssets", "kolkata-json", "core-prompts", "system-prompt.schema.json");
+        if (!File.Exists(path)) path = Path.Combine(Path.GetDirectoryName(path)!, "official-system-prompt.schema.json");
         if (!File.Exists(path)) return; // Older games use the bundled probe.
         try
         {
@@ -23,6 +24,17 @@ public static class GameProbe
         }
         catch (Exception e) when (e is IOException or JsonException or ArgumentException or InvalidOperationException)
         { throw new ApiFailure(400, "game_schema", "Could not read the installed game's response schema. Verify the game files before testing."); }
+    }
+
+    public static JsonObject PrepareCompletion(JsonObject original, string configPath)
+    {
+        if (original["response_format"] is not null || original["ai_category"]?.ToString() != "dialogue") return original;
+        // New game builds omit the optional local schema but still validate structured caller replies.
+        var prepared = (JsonObject)original.DeepClone();
+        ApplyInstalledSchema(prepared, configPath);
+        if (prepared["response_format"] is null)
+            throw new ApiFailure(400, "game_schema", "The game omitted its dialogue format and no installed dialogue schema was found. Verify the game files.");
+        return prepared;
     }
 
     private static void CheckSchema(JsonNode? node, int depth)

@@ -26,6 +26,17 @@ File.WriteAllText(probeSchemaPath,"""{"type":"json_schema","json_schema":{"name"
 GameProbe.ApplyInstalledSchema(probeRequest,probeConfig);
 GameProbe.ValidateResponse(probeRequest,"""{"dialogue":"Hello","comedy":0.5}""");
 Check(true,"probe reads installed schema and accepts its new field");
+var optionalSchema=Path.Combine(Path.GetDirectoryName(probeSchemaPath)!,"official-system-prompt.schema.json");
+File.Move(probeSchemaPath,optionalSchema);
+var omittedFormat=JsonNode.Parse("""{"ai_category":"dialogue","messages":[{"role":"user","content":"hello"}]}""")!.AsObject();
+var preparedFormat=GameProbe.PrepareCompletion(omittedFormat,probeConfig);
+Check(preparedFormat["response_format"] is JsonObject && omittedFormat["response_format"] is null && JsonNode.DeepEquals(preparedFormat["messages"],omittedFormat["messages"]),"schema-less dialogue uses installed official schema without mutating history or original request");
+Check(ReferenceEquals(GameProbe.PrepareCompletion(preparedFormat,probeConfig),preparedFormat),"explicit response format preserved");
+var nonDialogue=(JsonObject)omittedFormat.DeepClone();nonDialogue["ai_category"]="boss_review";
+Check(ReferenceEquals(GameProbe.PrepareCompletion(nonDialogue,probeConfig),nonDialogue),"non-dialogue requests are not assigned a caller schema");
+var optionalProbe=new JsonObject();GameProbe.ApplyInstalledSchema(optionalProbe,probeConfig);
+Check(JsonNode.DeepEquals(optionalProbe["response_format"],preparedFormat["response_format"]),"test probe and real dialogue use the same installed schema fallback");
+File.Move(optionalSchema,probeSchemaPath);
 foreach(var invalid in new[]{"""{"dialogue":"Hello"}""","""{"dialogue":"Hello","comedy":2}""","""{"dialogue":"Hello","comedy":"zero"}""","""{"dialogue":"Hello","comedy":0,"comedy":1}"""}){
  try{GameProbe.ValidateResponse(probeRequest,invalid);throw new Exception("Invalid probe response accepted");}catch(JsonException){Check(true,"installed schema rejects missing, out-of-range, wrong-type or duplicate fields");}
 }
@@ -129,7 +140,8 @@ string browserToken = new('b', 48), internalToken = new('i', 48);
 var panelDll = Path.Combine(AppContext.BaseDirectory, "SWYF.CustomAI.Panel.dll");
 using var panel = new Process { StartInfo = new("dotnet") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true } };
 panel.StartInfo.ArgumentList.Add(panelDll); panel.Start(); var stderr = panel.StandardError.ReadToEndAsync();
-var panelConfig = Path.Combine(output, "panel-settings.json");
+var panelConfig = Path.Combine(output, "http-game", "CustomAI", "settings.json");
+Directory.CreateDirectory(Path.GetDirectoryName(panelConfig)!);
 await panel.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new Startup(internalToken, browserToken, panelConfig, Environment.ProcessId), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 await panel.StandardInput.FlushAsync();
 var readyLine = await panel.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
@@ -157,6 +169,14 @@ Check((await client.GetStringAsync("/api/config")).Contains("/v1"), "test does n
 client.DefaultRequestHeaders.Remove("X-CustomAI-Token"); client.DefaultRequestHeaders.Add("X-CustomAI-Token", internalToken);
 Check((await client.GetFromJsonAsync<JsonObject>("/internal/status"))!["state"]!.GetValue<string>() == "success", "game status reflects saved provider test");
 Check((await client.PostAsJsonAsync("/internal/chat/completions", input)).IsSuccessStatusCode, "internal request forwarded");
+var httpSchemaPath=Path.Combine(output,"http-game","Scam With Your Friends_Data","StreamingAssets","kolkata-json","core-prompts","official-system-prompt.schema.json");
+Directory.CreateDirectory(Path.GetDirectoryName(httpSchemaPath)!);
+var expectedHttpFormat=JsonNode.Parse("""{"type":"json_schema","json_schema":{"name":"gameplay_caller_turn","strict":true,"schema":{"type":"object","properties":{"dialogue":{"type":"string"}},"required":["dialogue"],"additionalProperties":false}}}""")!;
+File.WriteAllText(httpSchemaPath,expectedHttpFormat.ToJsonString());
+Check((await client.PostAsJsonAsync("/internal/chat/completions",omittedFormat)).IsSuccessStatusCode && JsonNode.DeepEquals(observed!["response_format"],expectedHttpFormat),"schema-less real game request receives installed schema before upstream dispatch");
+var sentBeforeMissing=requests;
+File.Delete(httpSchemaPath);
+Check((await client.PostAsJsonAsync("/internal/chat/completions",omittedFormat)).StatusCode==HttpStatusCode.BadRequest && requests==sentBeforeMissing,"missing dialogue schema fails before sending a model request");
 Check(!(await client.GetStringAsync("/internal/status")).Contains("saved-secret"), "game status does not expose API credentials");
 Check((await client.GetAsync("/api/config")).StatusCode == HttpStatusCode.Unauthorized, "internal token cannot read browser config");
 panel.StandardInput.Close(); await panel.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(6)); Check(panel.ExitCode == 0, "helper shuts down on parent pipe EOF");
