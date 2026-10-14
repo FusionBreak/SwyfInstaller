@@ -193,7 +193,7 @@ or modified game DLLs.
 
 ## Troubleshooting
 
-Custom AI v1.1.1 supports Playtest build **25909758**. With custom AI enabled,
+Custom AI v1.1.2 supports Playtest build **25943600**. With custom AI enabled,
 prompt preparation uses the game's shipped local rules; turning custom AI off
 preserves the original game route. The hosted service accepts bounded caller
 schema additions and validates replies against the full game schema. Core API
