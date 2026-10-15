@@ -2,13 +2,34 @@
 # Builds, tests, packages the setup exe (+ .sha256), tags and publishes a GitHub Release.
 # Usage:  powershell -ExecutionPolicy Bypass -File release.ps1 -Tag v1.0.0
 #         powershell -ExecutionPolicy Bypass -File release.ps1 -Tag v1.0.0 -BuildOnly
+# Inno Setup 6/7 is detected automatically; override with -IsccPath or ISCC_PATH.
 param(
     [string]$Tag = "v1.0.0",
-    [switch]$BuildOnly
+    [switch]$BuildOnly,
+    [string]$IsccPath = $env:ISCC_PATH
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $version = $Tag.TrimStart('v')
+
+function Find-InnoCompiler {
+    if (![string]::IsNullOrWhiteSpace($IsccPath)) {
+        if (!(Test-Path -LiteralPath $IsccPath -PathType Leaf)) {
+            throw "Inno Setup compiler not found at '$IsccPath'. Check -IsccPath or ISCC_PATH."
+        }
+        return (Resolve-Path -LiteralPath $IsccPath).Path
+    }
+    $command = Get-Command ISCC.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Source }
+    foreach ($major in @(7, 6)) {
+        foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'))) {
+            if ([string]::IsNullOrWhiteSpace($base)) { continue }
+            $candidate = Join-Path $base "Inno Setup $major\ISCC.exe"
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
+    }
+    throw "Inno Setup 6 or 7 not found. Install it from https://jrsoftware.org/isinfo.php or pass -IsccPath."
+}
 
 function Step($msg) { Write-Host ""; Write-Host "=== $msg ===" -ForegroundColor Cyan }
 function Exec($cmd) {
@@ -23,6 +44,10 @@ Step "Checking working tree"
 $dirty = (git -C $root status --porcelain) -join "`n"
 if ($dirty.Trim() -ne "") { throw "Working tree is not clean. Commit everything first." }
 
+Step "Finding Inno Setup compiler"
+$iscc = Find-InnoCompiler
+Write-Host $iscc
+
 Step "Building solution"
 Exec "dotnet build `"$root\SwyfInstaller.sln`" -c Release --nologo -v q"
 
@@ -35,12 +60,12 @@ Exec "dotnet publish `"$root\SwyfInstaller.Gui\SwyfInstaller.Gui.csproj`" -c Rel
 Copy-Item "$root\SwyfInstaller\publish\SwyfInstaller.exe" "$root\SwyfInstaller.Gui\publish\" -Force
 
 Step "Building setup"
-$iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-if (!(Test-Path $iscc)) { throw "Inno Setup 6 not found at $iscc. Install it first: https://jrsoftware.org/isinfo.php" }
 Push-Location $root
-& $iscc "/DAppVersion=$version" "installer.iss"
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Inno Setup failed." }
-Pop-Location
+try {
+    & $iscc "/DAppVersion=$version" "installer.iss"
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed." }
+}
+finally { Pop-Location }
 $setupName = "SwyfInstaller-Setup-v$version-win-x64.exe"
 $setupPath = Join-Path $root "artifacts\$setupName"
 if (!(Test-Path $setupPath)) { throw "Setup output not found: $setupPath" }
@@ -82,6 +107,10 @@ Installer app + backend for SWYF Custom AI (mod source lives in custom-ai/).
 
 Run the setup to install (Start Menu + Programs list, no admin needed).
 "@
+$notesFile = Join-Path $root "releases\$Tag.md"
+if (Test-Path -LiteralPath $notesFile -PathType Leaf) {
+    $notes = Get-Content -LiteralPath $notesFile -Raw
+}
 $releaseBody = @{
     tag_name   = $Tag
     name       = "SwyfInstaller $Tag"
