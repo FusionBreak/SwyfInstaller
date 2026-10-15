@@ -42,6 +42,10 @@ public static class Store
                     // Migrate configs pointing at the old standalone mod repo (merged into custom-ai/ + deleted).
                     if (string.Equals(cfg.Repo.Trim(), "manifest-dex/swyf-custom-ai-mod", StringComparison.OrdinalIgnoreCase))
                         cfg.Repo = "manifest-dex/SwyfInstaller";
+                    if (GameDir.MigratePlaytest(cfg, GameDir.FindCandidates()))
+                    {
+                        try { SaveConfig(cfg); } catch { }
+                    }
                     return cfg;
                 }
             }

@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <AssemblyName>SwyfInstallerGui</AssemblyName>
-    <Version>1.1.4</Version>
+    <Version>1.1.5</Version>
     <Description>Basic UI for the SWYF Custom AI installer.</Description>
   </PropertyGroup>
 

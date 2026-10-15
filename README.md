@@ -1,6 +1,6 @@
 # SWYF Custom AI — Installer + Mod
 
-Use your own OpenAI-compatible AI provider in **Scam With Your Friends Playtest**.
+Use your own OpenAI-compatible AI provider in **Scam With Your Friends**.
 Only the **lobby host** needs the mod — guests join normally.
 
 Press **F8** or click **AI Settings** in the main or pause menu to configure
@@ -33,6 +33,12 @@ synthesis are handled by the game and are not modified.
 
 Guests don't need anything. New calls use your saved settings.
 
+**Moving from the Playtest:** Installer v1.1.5 detects the full release through
+Steam (app 4954910, normally `steamapps/common/Scam With Your Friends`). When
+both editions are installed, a saved Playtest selection switches to the full
+release. Press **Install** to apply the mod there, then check your settings with
+**F8**. Each game folder keeps its own mod settings and backups.
+
 ## What the app buttons do
 
 | Button | What happens | Your data |
@@ -49,7 +55,7 @@ always runs after download. A copyable details log lives under Details.
 
 You need:
 
-- **Windows x64** and a compatible **Scam With Your Friends Playtest**
+- **Windows x64** and a compatible **Scam With Your Friends**
   installation.
 - **.NET Runtime 10 and ASP.NET Core Runtime 10, Windows x64**. The installer
   checks both and downloads missing runtimes from Microsoft. Internet access
@@ -193,7 +199,8 @@ or modified game DLLs.
 
 ## Troubleshooting
 
-Custom AI v1.1.2 supports Playtest build **25943600**. With custom AI enabled,
+Custom AI v1.1.3 targets full release build **25965579** (Steam app **4954910**).
+With custom AI enabled,
 prompt preparation uses the game's shipped local rules; turning custom AI off
 preserves the original game route. The hosted service accepts bounded caller
 schema additions and validates replies against the full game schema. Core API

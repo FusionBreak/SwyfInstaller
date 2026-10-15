@@ -6,17 +6,33 @@ namespace SwyfInstaller;
 public static class GameDir
 {
     public const string ExeName = "Scam With Your Friends.exe";
-    public const string FolderName = "Scam With Your Friends Playtest";
+    public const string FolderName = "Scam With Your Friends";
+    public const string SteamAppId = "4954910";
     public const string ProcessName = "Scam With Your Friends";
 
-    public static List<string> FindCandidates()
+    public static List<string> FindCandidates() => FindCandidates(SteamLibraries());
+
+    internal static List<string> FindCandidates(IEnumerable<string> libraries)
     {
         var found = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string lib in SteamLibraries())
+        foreach (string lib in libraries)
         {
+            string folder = FolderName;
+            try
+            {
+                string manifest = Path.Combine(lib, "steamapps", "appmanifest_" + SteamAppId + ".acf");
+                if (File.Exists(manifest))
+                {
+                    var match = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(manifest), "\"installdir\"\\s*\"([^\"]+)\"");
+                    string installed = match.Groups[1].Value;
+                    if (match.Success && installed != "." && installed != ".." && Path.GetFileName(installed) == installed)
+                        folder = installed;
+                }
+            }
+            catch { }
             string dir;
-            try { dir = Path.GetFullPath(Path.Combine(lib, "steamapps", "common", FolderName)); }
+            try { dir = Path.GetFullPath(Path.Combine(lib, "steamapps", "common", folder)); }
             catch { continue; }
             string key = dir.ToUpperInvariant();
             if (seen.Contains(key)) continue;
@@ -27,6 +43,17 @@ public static class GameDir
             }
         }
         return found;
+    }
+
+    internal static bool MigratePlaytest(Store.AppConfig cfg, IReadOnlyList<string> candidates)
+    {
+        if (!string.Equals(Path.GetFileName(Path.TrimEndingDirectorySeparator(cfg.GameDir ?? "")),
+                "Scam With Your Friends Playtest", StringComparison.OrdinalIgnoreCase) || candidates.Count == 0)
+            return false;
+        cfg.GameDir = candidates[0];
+        // The recorded mod version belongs to the old installation.
+        cfg.InstalledTag = "";
+        return true;
     }
 
     public static bool IsGameDir(string dir)

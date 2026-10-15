@@ -24,6 +24,33 @@ internal static class SelfTest
         Store.AppDirOverride = Path.Combine(root, "appdata");
         try
         {
+            string library = Path.Combine(root, "steam-library");
+            string common = Path.Combine(library, "steamapps", "common");
+            string playtest = Path.Combine(common, "Scam With Your Friends Playtest");
+            string fullGame = Path.Combine(common, "Scam With Your Friends");
+            Directory.CreateDirectory(playtest);
+            File.WriteAllText(Path.Combine(playtest, GameDir.ExeName), "fake-game");
+            Check(GameDir.FindCandidates([library]).Count == 0, "automatic detection does not select the Playtest");
+            Directory.CreateDirectory(fullGame);
+            Check(GameDir.FindCandidates([library]).Count == 0, "automatic detection requires the game executable");
+            File.WriteAllText(Path.Combine(fullGame, GameDir.ExeName), "fake-game");
+            var candidates = GameDir.FindCandidates([library, library.ToUpperInvariant()]);
+            Check(candidates.SequenceEqual([fullGame]), "full release detected once when both editions are installed");
+            var saved = new Store.AppConfig { GameDir = playtest + Path.DirectorySeparatorChar, InstalledTag = "custom-ai-v1.1.2", Repo = "o/r" };
+            Check(GameDir.MigratePlaytest(saved, candidates) && saved.GameDir == fullGame && saved.InstalledTag == "" && saved.Repo == "o/r", "saved Playtest path migrates and clears the old install version");
+            saved.GameDir = playtest;
+            Check(!GameDir.MigratePlaytest(saved, []) && saved.GameDir == playtest, "saved Playtest remains available when full release is absent");
+            saved.GameDir = Path.Combine(root, "manual-install");
+            Check(!GameDir.MigratePlaytest(saved, candidates) && saved.GameDir.EndsWith("manual-install"), "manually selected folders are preserved");
+            string renamedGame = Path.Combine(common, "SWYF Full");
+            Directory.CreateDirectory(renamedGame);
+            File.WriteAllText(Path.Combine(renamedGame, GameDir.ExeName), "fake-game");
+            string steamManifest = Path.Combine(library, "steamapps", "appmanifest_4954910.acf");
+            File.WriteAllText(steamManifest, "\"AppState\" { \"appid\" \"4954910\" \"installdir\" \"SWYF Full\" }");
+            Check(GameDir.FindCandidates([library]).SequenceEqual([renamedGame]), "Steam full release manifest selects its actual install directory");
+            File.WriteAllText(steamManifest, "\"installdir\" \"../outside\"");
+            Check(GameDir.FindCandidates([library]).SequenceEqual([fullGame]), "invalid manifest path falls back to the standard full release folder");
+
             string gameDir = Path.Combine(root, "game");
             string payload = Path.Combine(root, "payload");
             Directory.CreateDirectory(gameDir);

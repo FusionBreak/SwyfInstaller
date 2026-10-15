@@ -6,7 +6,7 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>SwyfInstaller</AssemblyName>
-    <Version>1.1.4</Version>
+    <Version>1.1.5</Version>
     <Description>Console installer for SWYF Custom AI with SHA-256 verification.</Description>
   </PropertyGroup>
 

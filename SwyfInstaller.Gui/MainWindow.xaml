@@ -38,7 +38,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <ui:TextBox Text="{Binding GameDir, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                PlaceholderText="Scam With Your Friends Playtest folder" Margin="0,0,8,0" />
+                                PlaceholderText="Scam With Your Friends folder" Margin="0,0,8,0" />
                     <ui:Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseGameDirCommand}" Margin="0,0,8,0" Padding="10,5" />
                     <ui:Button Grid.Column="2" Content="Detect" Command="{Binding DetectGameDirCommand}" Padding="10,5" />
                 </Grid>

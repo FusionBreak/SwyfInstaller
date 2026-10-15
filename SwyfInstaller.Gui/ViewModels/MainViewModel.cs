@@ -1,5 +1,4 @@
 using System.IO;
-using System.Text.Json;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -41,32 +40,25 @@ public partial class MainViewModel : ObservableObject
         await CheckForUpdatesAsync(manual: false);
     }
 
-    private string AppDataDir() =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SwyfInstaller");
-
     private static string WorkDir() => Path.Combine(Path.GetTempPath(), "SwyfInstaller");
 
     private SwyfInstaller.Store.AppConfig LoadBackendConfig()
     {
         var cfg = SwyfInstaller.Store.LoadConfig();
         if (GameDir.Trim() != "")
+        {
+            if (!string.Equals(cfg.GameDir, GameDir.Trim(), StringComparison.OrdinalIgnoreCase))
+                cfg.InstalledTag = "";
             cfg.GameDir = GameDir.Trim();
+        }
         return cfg;
     }
 
     private void LoadSavedState()
     {
-        try
-        {
-            string cfg = Path.Combine(AppDataDir(), "config.json");
-            if (!File.Exists(cfg)) return;
-            using var doc = JsonDocument.Parse(File.ReadAllText(cfg));
-            if (doc.RootElement.TryGetProperty("GameDir", out var g) && g.GetString() is string gd && gd != "")
-                GameDir = gd;
-            if (doc.RootElement.TryGetProperty("InstalledTag", out var t) && t.GetString() is string tag)
-                InstalledTag = tag;
-        }
-        catch { }
+        var cfg = SwyfInstaller.Store.LoadConfig();
+        GameDir = cfg.GameDir;
+        InstalledTag = cfg.InstalledTag;
     }
 
     private void ValidateGameDir()
@@ -172,8 +164,8 @@ public partial class MainViewModel : ObservableObject
             GameDir = candidates[0];
             try
             {
-                var cfg = SwyfInstaller.Store.LoadConfig();
-                cfg.GameDir = GameDir;
+                var cfg = LoadBackendConfig();
+                InstalledTag = cfg.InstalledTag;
                 SwyfInstaller.Store.SaveConfig(cfg);
             }
             catch { }
