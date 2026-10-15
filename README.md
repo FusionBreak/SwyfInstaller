@@ -96,12 +96,16 @@ The installer app shows this same setup with a one-click copy button.
 
 ## Configure your provider
 
-### ManifestDeX AI for members
+### ManifestDeX AI for Free and Pro members
 
-The F8 panel also offers **Use ManifestDeX AI**, a community-hosted option at
-`https://swyf-ai.manifestdex.com`. Click **Sign in with ManifestDeX**, approve
-the requested permissions in your browser, then select the option and save.
-The service must be available and configured by its administrator.
+[ManifestDeX](https://manifestdex.com) provides AI for your callers through
+**Use ManifestDeX AI** in the F8 panel. Both **Free** and **Pro** members can
+use the service, with **request and token limits specific to their membership
+tier**. You do not need to supply your own AI provider API key for this option.
+
+Click **Sign in with ManifestDeX**, approve the requested permissions in your
+browser, select **Use ManifestDeX AI**, then click **Save Settings** to activate
+it in the game. The service is hosted at `https://swyf-ai.manifestdex.com`.
 
 While selected, private provider fields are locked and their saved values are
 preserved. After sign-in the panel shows your name/avatar, Free/Pro
