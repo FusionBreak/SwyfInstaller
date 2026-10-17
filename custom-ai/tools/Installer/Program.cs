@@ -43,7 +43,7 @@ public static class Program
                 Process.GetProcessesByName("SWYF.CustomAI.Panel").Length > 0))
                 throw new InvalidOperationException("Close the game first.");
             Manifest? manifest = File.Exists(manifestPath) ? JsonSerializer.Deserialize<Manifest>(File.ReadAllText(manifestPath)) : null;
-            if (manifest != null && (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7) || manifest.Files == null || manifest.Files.Length != 2 ||
+            if (manifest != null && (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8) || manifest.Files == null || manifest.Files.Length != 2 ||
                 manifest.Files.Any(x => x == null || !GameFiles.Contains(x.Name) || !ValidHash(x.OriginalHash) || !ValidHash(x.PatchedHash)) ||
                 manifest.Files.Select(x => x.Name).Distinct().Count() != 2))
                 throw new InvalidOperationException("Invalid installation manifest.");
@@ -75,7 +75,7 @@ public static class Program
             // Select the current clean files (or verified backups for files still carrying our patch).
             var sources = new Dictionary<string, string>();
             var observedHashes = new Dictionary<string, string>();
-            bool needsRepair = manifest == null;
+            bool needsRepair = manifest == null || manifest.Version < 8;
             foreach (var name in GameFiles)
             {
                 var live = Path.Combine(managed, name);
@@ -85,7 +85,7 @@ public static class Program
                 {
                     var backup = Backup(record); RequireHash(backup, record.OriginalHash);
                     sources[name] = backup;
-                    VerifyPatched(live, name == "ScriptsAssDef.dll" ? (manifest!.Version == 1 ? 2 : 3) : (manifest!.Version == 4 ? 4 : manifest.Version == 7 ? CurrentAiHookCount(live) : 2),
+                    VerifyPatched(live, name == "ScriptsAssDef.dll" ? (manifest!.Version == 1 ? 2 : 3) : (manifest!.Version == 4 ? 4 : manifest.Version >= 7 ? CurrentAiHookCount(live, manifest.Version >= 8) : 2),
                         manifest.Version == 5 ? "ConfigureBackend" : manifest.Version >= 6 ? "EnsureInitialized" : null);
                 }
                 else { Compatibility.RequireUnpatched(live); sources[name] = live; needsRepair = true; }
@@ -135,7 +135,7 @@ public static class Program
                 AtomicCopy(bridge, Path.Combine(managed, BridgeName));
                 foreach (var name in GameFiles) AtomicCopy(Path.Combine(stage, name), Path.Combine(managed, name));
                 File.Delete(legacyConfig);
-                var installed = new Manifest(7, records.ToArray()) { Extra = manifest?.Extra };
+                var installed = new Manifest(8, records.ToArray()) { Extra = manifest?.Extra };
                 File.WriteAllText(manifestPath + ".tmp", JsonSerializer.Serialize(installed, new JsonSerializerOptions { WriteIndented = true }));
                 File.Move(manifestPath + ".tmp", manifestPath, true);
             }
@@ -185,6 +185,17 @@ public static class Program
         if (Path.GetFileName(input) == "Assembly-CSharp.dll")
         {
             var type = module.Types.Single(t => t.FullName == "KolkataApi");
+            var entry = GameEntry.Getter(assembly);
+            if (entry != null)
+            {
+                var backendGate = GameEntry.BackendGate(entry);
+                ExpandBranches(entry);
+                var entryIl = entry.Body.GetILProcessor();
+                foreach (var instruction in new[] {
+                    entryIl.Create(OpCodes.Call, Import("UseCustomProviderForGameEntry")),
+                    entryIl.Create(OpCodes.Brfalse, backendGate), entryIl.Create(OpCodes.Ldc_I4_1), entryIl.Create(OpCodes.Ret) })
+                    entryIl.InsertBefore(backendGate, instruction);
+            }
             var complete = type.Methods.Single(m => m.Name == "CompleteOpenRouterAsync" && m.Parameters.Count == 3);
             ExpandBranches(complete);
             if (complete.Parameters[0].ParameterType.FullName != "Newtonsoft.Json.Linq.JObject" ||
@@ -234,10 +245,11 @@ public static class Program
         assembly.Write(output);
     }
 
-    private static int CurrentAiHookCount(string path)
+    private static int CurrentAiHookCount(string path, bool includeGameEntry = true)
     {
         using var assembly = AssemblyDefinition.ReadAssembly(path);
-        return assembly.MainModule.Types.Single(t => t.Name == "AIConversation").Methods.Any(m => m.Name == "FreezePromptAsync") ? 3 : 2;
+        return (assembly.MainModule.Types.Single(t => t.Name == "AIConversation").Methods.Any(m => m.Name == "FreezePromptAsync") ? 3 : 2) +
+            (includeGameEntry && GameEntry.Getter(assembly) != null ? 1 : 0);
     }
 
     public static void VerifyPatched(string path, int expected, string? startupHook = null)

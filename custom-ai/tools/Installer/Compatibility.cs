@@ -39,6 +39,8 @@ public static class Compatibility
         }
 
         var api = Type(ai, "KolkataApi");
+        var entry = GameEntry.Getter(ai);
+        if (entry != null) GameEntry.BackendGate(entry);
         if (!InheritsComponent(api)) Fail("KolkataApi is no longer a Unity component.");
         var complete = Method(api, "CompleteOpenRouterAsync", "Cysharp.Threading.Tasks.UniTask`1<Newtonsoft.Json.Linq.JObject>",
             "Newtonsoft.Json.Linq.JObject", "System.Threading.CancellationToken", "System.Boolean");

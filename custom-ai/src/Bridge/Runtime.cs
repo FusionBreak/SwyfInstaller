@@ -43,6 +43,9 @@ namespace Swyf.CustomAI
             catch { return true; }
         }
 
+        // This changes local game entry only; no game-service credentials or auth state are created.
+        public static bool UseCustomProviderForGameEntry() => ReadEnabled();
+
         public static void EnsureInitialized()
         {
             if (instance != null) return;
@@ -149,11 +152,15 @@ namespace Swyf.CustomAI
             label.EnableInClassList("connection-state--failed", failed);
             foreach (var name in new[] { "vip-membership-role", "unlimited-membership-role" })
             { var role = root.Q<Label>(name); if (role != null) role.style.display = DisplayStyle.None; }
+            root.Q<VisualElement>("menu-root")?.EnableInClassList("menu-root--auth-recovery", false);
+            foreach (var name in new[] { "browser-sign-in-message", "sign-in-support-message" })
+            { var message = root.Q<Label>(name); if (message != null) message.style.display = DisplayStyle.None; }
             // The original renderer still owns Steam connectivity warnings.
             if (root.Q<Label>("steam-connection-status")?.ClassListContains("connection-state--failed") == true) return;
             warning.style.display = failed || state == "untested" ? DisplayStyle.Flex : DisplayStyle.None;
             root.Q<VisualElement>("connection-status")?.EnableInClassList("connection-status--warning", failed);
             title.text = failed ? "CUSTOM AI CONNECTION FAILED" : "CUSTOM AI NOT TESTED YET";
+            body.style.display = DisplayStyle.Flex;
             body.text = failed ? ((string?)self.connectionStatus?["message"] ?? self.error) + " Press F8 to open settings." :
                 "Press F8 to test the connection, or start a call. Game AI sign-in does not indicate the status of this provider.";
         }

@@ -23,12 +23,17 @@ internal static class Program
         {
             var options=new FakeOptions{GameplayRoute="official"};
             File.WriteAllText(config,"{\"enabled\":false}");
+            if(Runtime.UseCustomProviderForGameEntry())throw new Exception("Disabled mod changed game entry.");
             Runtime.PrepareConversation(options);
             if(options.GameplayRoute!="official")throw new Exception("Disabled mod changed routing.");
             File.WriteAllText(config,"{\"enabled\":true}");
+            if(!Runtime.UseCustomProviderForGameEntry())throw new Exception("Custom provider still requires game AI sign-in.");
             Runtime.PrepareConversation(options);
             if(options.GameplayRoute!="openrouter")throw new Exception("Custom provider did not use local prompts.");
             Console.WriteLine("PASS: custom provider selects local prompt preparation; disabled mod preserves original route.");
+            File.Delete(config);
+            if(Runtime.UseCustomProviderForGameEntry())throw new Exception("Missing settings changed game entry.");
+            Console.WriteLine("PASS: game AI sign-in is optional only while custom AI is enabled.");
         }
         finally{if(prior==null)File.Delete(config);else File.WriteAllBytes(config,prior);}
     }

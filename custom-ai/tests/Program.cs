@@ -208,6 +208,7 @@ Check(Installer.Main(["install", game, dist, "--disable-kolkata=true"]) != 0 && 
     "removed installer option is rejected before game files change");
 Check(Installer.Main(["install", game, dist]) == 0 && !File.Exists(gameConfig), "new installation creates no startup configuration");
 Check(Installer.Main(["verify", game]) == 0, "patched assembly hook verification");
+GameEntryTests.Run(Path.Combine(managed, "Assembly-CSharp.dll"), Check);
 var legacyAssemblyPath = Path.Combine(managed, "Assembly-CSharp.dll");
 var legacyManifestPath = Path.Combine(game, "CustomAI", "manifest.json");
 var privateSettings = Path.Combine(game, "CustomAI", "settings.json");
@@ -231,9 +232,9 @@ void CheckStandardHooks(string message)
         m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name == "EnsureInitialized") == 1 &&
         !assembly.MainModule.GetMemberReferences().Any(m => m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name is "ConfigureBackend" or "SkipAuth"), message);
 }
-CheckStandardHooks("new installation initializes the mod without backend or authentication overrides");
+CheckStandardHooks("new installation preserves backend authentication and initializes the custom provider");
 // Recreate the withdrawn test layouts only in disposable copies and migrate from verified backups.
-foreach (var legacyVersion in new[] { 4, 5 })
+foreach (var legacyVersion in new[] { 4, 5, 7 })
 {
     using (var resolver = new Mono.Cecil.DefaultAssemblyResolver())
     {
@@ -241,8 +242,15 @@ foreach (var legacyVersion in new[] { 4, 5 })
         using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(legacyAssemblyPath, new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
         var module = assembly.MainModule;
         var api = module.Types.Single(t => t.Name == "KolkataApi");
+        var entry = api.Methods.SingleOrDefault(m => m.Name == "get_CanStartGame");
+        var entryHook = entry?.Body.Instructions.SingleOrDefault(i => i.Operand is Mono.Cecil.MethodReference m && m.Name == "UseCustomProviderForGameEntry");
+        if (entryHook != null)
+        {
+            var index = entry!.Body.Instructions.IndexOf(entryHook);
+            for (var i = 0; i < 4; i++) entry.Body.Instructions.RemoveAt(index);
+        }
         var freeze = module.Types.Single(t => t.Name == "AIConversation").Methods.SingleOrDefault(m => m.Name == "FreezePromptAsync");
-        if (freeze != null && freeze.Body.Instructions.Any(i => i.Operand is Mono.Cecil.MethodReference m && m.Name == "PrepareConversation"))
+        if (legacyVersion < 7 && freeze != null && freeze.Body.Instructions.Any(i => i.Operand is Mono.Cecil.MethodReference m && m.Name == "PrepareConversation"))
         { freeze.Body.Instructions.RemoveAt(0); freeze.Body.Instructions.RemoveAt(0); }
         var awake = api.Methods.Single(m => m.Name == "Awake");
         var initialize = awake.Body.Instructions.Single(i => i.Operand is Mono.Cecil.MethodReference m && m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name == "EnsureInitialized");
@@ -255,7 +263,7 @@ foreach (var legacyVersion in new[] { 4, 5 })
             awake.Body.GetILProcessor().InsertBefore(initialize, Mono.Cecil.Cil.Instruction.Create(Mono.Cecil.Cil.OpCodes.Ldarg_0));
             initialize.Operand = configure;
         }
-        else
+        else if (legacyVersion == 4)
         {
             foreach (var getter in new[] { "get_BackendAuthenticated", "get_LobbyAuthenticated" })
             {
@@ -287,10 +295,11 @@ foreach (var legacyVersion in new[] { 4, 5 })
     File.WriteAllText(gameConfig, "disable_kolkata_api = true\n");
     Check(Installer.Main(["install", game, dist]) == 0 && Installer.Main(["verify", game]) == 0, $"version {legacyVersion} test installation migrates to current hooks");
     var migratedManifest = JsonNode.Parse(File.ReadAllText(legacyManifestPath))!;
-    Check(migratedManifest["Version"]!.GetValue<int>() == 7 && migratedManifest["LegacyMetadata"]?["mode"]?.GetValue<string>() == "preserved" &&
+    Check(migratedManifest["Version"]!.GetValue<int>() == 8 && migratedManifest["LegacyMetadata"]?["mode"]?.GetValue<string>() == "preserved" &&
         !File.Exists(gameConfig) && File.ReadAllText(privateSettings) == privateSettingsText,
         $"version {legacyVersion} migration removes obsolete config and preserves private settings and manifest metadata");
-    CheckStandardHooks($"version {legacyVersion} migration removes backend and authentication overrides");
+    CheckStandardHooks($"version {legacyVersion} migration preserves backend authentication state");
+    GameEntryTests.Run(legacyAssemblyPath, Check);
 }
 File.WriteAllText(gameConfig, "obsolete test configuration");
 Check(Installer.Main(["uninstall", game]) == 0 && !File.Exists(gameConfig) && File.ReadAllText(privateSettings) == privateSettingsText,
@@ -336,13 +345,18 @@ Check(await RunWrapper("Install Custom AI.cmd") == 0 && File.ReadAllText(private
 Check(await RunWrapper("Uninstall Custom AI.cmd") == 0, "double-click uninstall restores extracted installation");
 File.WriteAllText(Path.Combine(game, "steam_appid.txt"), "not-a-steam-id");
 Check(await RunWrapper("Play with Custom AI.cmd") != 0, "play wrapper stops on invalid Steam metadata without launching");
-void SimulateUpdate(string name, bool breakHook = false)
+void SimulateUpdate(string name, bool breakHook = false, bool breakEntry = false)
 {
     var path = Path.Combine(managed, name);
     using var resolver = new Mono.Cecil.DefaultAssemblyResolver(); resolver.AddSearchDirectory(managed);
     using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(path, new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
     assembly.MainModule.Mvid = Guid.NewGuid();
     if (breakHook) assembly.MainModule.Types.Single(t => t.Name == "KolkataApi").Methods.Single(m => m.Name == "CompleteOpenRouterAsync").Name = "ChangedCompletionContract";
+    if (breakEntry)
+    {
+        var entry = assembly.MainModule.Types.Single(t => t.Name == "KolkataApi").Methods.Single(m => m.Name == "get_CanStartGame");
+        ((Mono.Cecil.MethodReference)entry.Body.Instructions[0].Operand).Name = "ChangedSteamInitialization";
+    }
     assembly.Write(path + ".updated");
     assembly.Dispose();
     File.Move(path + ".updated", path, true);
@@ -369,6 +383,17 @@ var incompatibleHash = Installer.Hash(Path.Combine(managed, "Assembly-CSharp.dll
 var unchangedUi = Installer.Hash(Path.Combine(managed, "ScriptsAssDef.dll"));
 Check(Installer.Main(["install", game, dist]) != 0 && Installer.Hash(Path.Combine(managed, "Assembly-CSharp.dll")) == incompatibleHash && Installer.Hash(Path.Combine(managed, "ScriptsAssDef.dll")) == unchangedUi, "incompatible update rejected before either live assembly changes");
 Check(Installer.Main(["uninstall", game]) == 0 && Installer.Hash(Path.Combine(managed, "Assembly-CSharp.dll")) == incompatibleHash, "uninstall preserves incompatible Steam replacement");
+File.Copy(Path.Combine(game, "CustomAI", "backup", aiRecord.OriginalHash, aiRecord.Name), Path.Combine(managed, aiRecord.Name), true);
+bool hasEntryGate;
+using (var cleanAi = Mono.Cecil.AssemblyDefinition.ReadAssembly(Path.Combine(managed, aiRecord.Name)))
+    hasEntryGate = cleanAi.MainModule.Types.Single(t => t.Name == "KolkataApi").Methods.Any(m => m.Name == "get_CanStartGame");
+if (hasEntryGate)
+{
+    SimulateUpdate("Assembly-CSharp.dll", breakEntry: true);
+    var changedGate = Installer.Hash(Path.Combine(managed, aiRecord.Name));
+    Check(Installer.Main(["install", game, dist]) != 0 && Installer.Hash(Path.Combine(managed, aiRecord.Name)) == changedGate,
+        "changed Steam entry contract is rejected before live files are patched");
+}
 }
 if (args.Contains("--live"))
 {
