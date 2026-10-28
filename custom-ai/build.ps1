@@ -34,6 +34,18 @@ try {
         $text = [IO.File]::ReadAllText($wrapper.FullName).Replace("`r`n", "`n").Replace("`n", "`r`n")
         [IO.File]::WriteAllText((Join-Path $releaseRoot $wrapper.Name), $text, [Text.UTF8Encoding]::new($false))
     }
-    Compress-Archive -Path (Join-Path $releaseRoot '*') -DestinationPath artifacts/SWYF-Custom-AI-win-x64.zip -Force
+    # Windows PowerShell 5.1 Compress-Archive writes backslash entry names; ZIP requires forward slashes.
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $zipPath = Join-Path $PSScriptRoot 'artifacts/SWYF-Custom-AI-win-x64.zip'
+    New-Item -ItemType Directory -Force -Path (Split-Path $zipPath) | Out-Null
+    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+    $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $rootLength = (Get-Item -LiteralPath $releaseRoot).FullName.TrimEnd('\').Length + 1
+        foreach ($file in Get-ChildItem -LiteralPath $releaseRoot -Recurse -File) {
+            $entryName = $file.FullName.Substring($rootLength).Replace('\', '/')
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $entryName, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally { $zip.Dispose() }
     Write-Output 'Extract-to-game release: artifacts/SWYF-Custom-AI-win-x64.zip'
 } finally { Pop-Location }
