@@ -206,7 +206,7 @@ or modified game DLLs.
 
 ## Troubleshooting
 
-Custom AI v1.1.4 targets full release build **26003210** (Steam app **4954910**).
+Custom AI v1.1.5 targets full release build **26003210** (Steam app **4954910**).
 With custom AI enabled,
 prompt preparation uses the game's shipped local rules; turning custom AI off
 preserves the original game route. The hosted service accepts bounded caller
@@ -220,7 +220,7 @@ or protocol changes may still require another update.
   `[CustomAI]` entries in
   `%USERPROFILE%\AppData\LocalLow\Jatater Worldwide\Scam With Your Friends\Player.log`.
 - **Sign in with Steam appears instead of Play** — open F8, enable **Use custom
-  provider**, and click **Save Settings**. With v1.1.4 installed, the game's AI
+  provider**, and click **Save Settings**. With v1.1.5 installed, the game's AI
   service sign-in is optional while custom AI is enabled. The Steam client must
   remain signed in and connected for multiplayer.
 - **"Sorry, what were you saying?"** — the game's fallback response. Open F8

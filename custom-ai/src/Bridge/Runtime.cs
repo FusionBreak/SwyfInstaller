@@ -59,6 +59,20 @@ namespace Swyf.CustomAI
             catch { Debug.LogError("[CustomAI] Could not initialize the mod."); }
         }
 
+        // The game's System.dll no longer ships Uri.EscapeDataString.
+        private static string PercentEncode(string value)
+        {
+            var builder = new StringBuilder();
+            foreach (var b in Encoding.UTF8.GetBytes(value))
+            {
+                var c = (char)b;
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~')
+                    builder.Append(c);
+                else builder.Append('%').Append(b.ToString("X2"));
+            }
+            return builder.ToString();
+        }
+
         private static string NewToken()
         {
             var bytes = new byte[32];
@@ -117,7 +131,7 @@ namespace Swyf.CustomAI
             if (helper != null && url.Length == 0 && Time.realtimeSinceStartup - startedAt > 10)
             { StopHelper(); error = "The panel did not start within 10 seconds. Press F8 to retry."; }
             if (Keyboard.current != null && Keyboard.current.f8Key.wasPressedThisFrame) OpenSettings();
-            if (pendingOpen && url.Length > 0) { pendingOpen = false; Application.OpenURL(url + "/#" + Uri.EscapeDataString(browserToken)); }
+            if (pendingOpen && url.Length > 0) { pendingOpen = false; Application.OpenURL(url + "/#" + PercentEncode(browserToken)); }
         }
 
         public static void OpenSettings()
