@@ -1,0 +1,158 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+const html=readFileSync(new URL('../src/Panel/index.html',import.meta.url),'utf8');
+const script=html.split('<script nonce="__NONCE__">')[1].split('</script>')[0];
+const ttsPcm=Uint8Array.from({length:96},(_,i)=>i%251);
+// The game voice map uses last-wins on duplicate paths: the panel drops blank rows and a later row for the same path overrides an earlier one.
+function fixture({ttsTest='ok',ttsOn=true}={}){
+ const nodes=new Map(),events=new Map(),calls=[],blobs=[],played=[],paused=[];let dynamic=0;
+ const server={enabled:true,useManifestDeX:false,baseUrl:'https://private.example/v1',model:'private-model',temperature:null,topP:null,maxTokens:null,outputMode:'schema',hasApiKey:true,ttsEnabled:ttsOn,ttsBaseUrl:'https://tts.example/v1',ttsModel:'voice-model',ttsVoice:'default-voice',ttsApiKey:ttsOn?'saved-tts-secret':'',ttsSpeed:ttsOn?1.25:null,ttsVoiceMap:ttsOn?{'voice/player/anna':'alloy','voice/npc/guard':'onyx'}:{}};
+ let saved={...server};
+ const response=(status,body,headers={},bytes=null)=>({ok:status<400,status,headers:{get:name=>headers[name]??null},json:async()=>body,arrayBuffer:async()=>bytes??new ArrayBuffer(0)});
+ const node=id=>nodes.get(id)||(()=>{const n={id,value:'',checked:false,disabled:false,hidden:false,dataset:{},children:[],textContent:'',className:'',addEventListener:(name,fn)=>events.set(id+':'+name,fn),replaceChildren(...v){this.children=v},append(...v){this.children.push(...v)},reportValidity:()=>true};nodes.set(id,n);return n})();
+ const element=tag=>{const id='dyn'+(dynamic++)+'-'+tag;return {id,tag,value:'',children:[],dataset:{},textContent:'',className:'',type:'',placeholder:'',addEventListener:(name,fn)=>events.set(id+':'+name,fn),replaceChildren(...v){this.children=v},append(...v){this.children.push(...v)},play(){played.push(this);return Promise.resolve()},pause(){paused.push(this)}}};
+ class BlobStub{constructor(parts,options){this.parts=parts;this.type=options?.type}}
+ const context={console,Date,Math,Number,Error,Promise,ArrayBuffer,DataView,
+  URL:{createObjectURL:blob=>{blobs.push(blob);return 'blob:fixture-'+blobs.length},revokeObjectURL(){}},Blob:BlobStub,
+  location:{hash:'',pathname:'/'},history:{replaceState(){}},sessionStorage:{getItem:()=>'',setItem(){}},setInterval(){},clearInterval(){},setTimeout(){},
+  document:{hidden:false,getElementById:node,querySelectorAll:()=>[],createElement:element,createTextNode:text=>({textContent:text}),addEventListener(){}},
+  window:{open:()=>({closed:false})},
+  fetch:async(path,options)=>{const method=options?.method||'GET',body=options?.body?JSON.parse(options.body):null;calls.push({path,method,body});
+   if(path==='/api/config'){if(method==='PUT'){const {clearTtsApiKey,ttsApiKey,...draft}=body;saved={...saved,...draft};saved.ttsApiKey=clearTtsApiKey?'':(ttsApiKey||saved.ttsApiKey||'')}
+    const {ttsApiKey,...publicConfig}=saved;return response(200,{...publicConfig,hasApiKey:server.hasApiKey,hasTtsApiKey:ttsApiKey.length>0})}
+   if(path==='/api/status')return response(200,{completed:0});
+   if(path==='/api/manifestdex/status')return response(200,{available:true,connected:false,signInAvailable:true});
+   if(path.startsWith('/api/manifestdex/account'))return response(200,{connected:false});
+   if(path==='/api/tts/test'){if(ttsTest==='error')return response(502,{error:'auth',message:'The TTS provider denied access. Check your TTS API key and permissions.'});return response(200,null,{'X-Tts-Sample-Rate':'24000','X-Tts-Voice':body?.ttsVoice??''},ttsPcm.buffer)}
+   throw Error(path)}};
+ vm.runInNewContext(script,context);
+ return {node,events,calls,blobs,played,paused};
+}
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+const f=fixture();await flush();await flush();
+assert.equal(f.node('ttsEnabled').checked,true);
+assert.equal(f.node('ttsBaseUrl').value,'https://tts.example/v1');
+assert.equal(f.node('ttsModel').value,'voice-model');
+assert.equal(f.node('ttsVoice').value,'default-voice');
+assert.equal(String(f.node('ttsSpeed').value),'1.25');
+assert.equal(f.node('ttsApiKey').value,'','fill must never reveal the saved TTS key');
+assert.match(f.node('ttsKeyState').textContent,/TTS API key is saved/);
+assert.equal(f.node('ttsVoiceMap').children.length,2);
+assert.equal(f.node('ttsVoiceMap').children[0].children[0].value,'voice/player/anna');
+assert.equal(f.node('ttsVoiceMap').children[0].children[1].value,'alloy');
+assert.match(f.node('activeSettings').textContent,/Game uses: Private provider · private-model \+ custom voice/);
+f.events.get('config:submit')({preventDefault(){}});await flush();await flush();
+const savedPut=f.calls.find(c=>c.path==='/api/config'&&c.method==='PUT');
+assert.ok(savedPut,'shared Save must submit one whole-document PUT');
+const doc=savedPut.body;
+assert.equal(doc.baseUrl,'https://private.example/v1');assert.equal(doc.model,'private-model');
+assert.equal(doc.ttsEnabled,true);assert.equal(doc.ttsBaseUrl,'https://tts.example/v1');assert.equal(doc.ttsModel,'voice-model');assert.equal(doc.ttsVoice,'default-voice');
+assert.equal(doc.ttsSpeed,1.25);assert.equal(doc.ttsApiKey,null,'fields() sends a null TTS key, never the saved one');assert.equal(doc.clearTtsApiKey,false);
+assert.deepEqual(doc.ttsVoiceMap,{'voice/player/anna':'alloy','voice/npc/guard':'onyx'});
+assert.match(f.node('notice').textContent,/Saved\. New requests will use these settings/,'submit must reach the panel');
+assert.equal(f.node('savedState').textContent,'Saved');
+console.log('PASS: fill() loads every TTS field and voice-map row, and shared Save submits the whole TTS document with the map object, number speed and null key.');
+const off=fixture({ttsOn:false});await flush();await flush();
+assert.equal(off.node('ttsEnabled').checked,false);
+assert.equal(off.node('ttsSpeed').value,'');
+assert.equal(off.node('ttsKeyState').textContent,'No TTS API key saved.');
+assert.equal(off.node('ttsVoiceMap').children.length,0);
+assert.doesNotMatch(off.node('activeSettings').textContent,/custom voice/);
+console.log('PASS: a config with custom TTS off loads unchecked, keyless, blank speed and no voice-map rows, and the summary omits the custom voice.');
+const edges=fixture();await flush();await flush();
+edges.node('ttsSpeed').value='';
+edges.events.get('ttsMapAdd:click')();edges.events.get('ttsMapAdd:click')();
+assert.equal(edges.node('ttsVoiceMap').children.length,4);
+const duplicate=edges.node('ttsVoiceMap').children[2];duplicate.children[0].value='voice/player/anna';duplicate.children[1].value='nova';
+const half=edges.node('ttsVoiceMap').children[3];half.children[0].value='voice/half-filled';half.children[1].value='';
+edges.events.get('config:submit')({preventDefault(){}});await flush();await flush();
+const edgeDoc=edges.calls.filter(c=>c.path==='/api/config'&&c.method==='PUT').at(-1).body;
+assert.equal(edgeDoc.ttsSpeed,null,'a blank speed serializes to null');
+assert.equal(edgeDoc.ttsApiKey,null);
+assert.deepEqual(edgeDoc.ttsVoiceMap,{'voice/player/anna':'nova','voice/npc/guard':'onyx'},'blank and half-empty rows drop out; a duplicate game path keeps the last row');
+assert.equal(edges.node('savedState').textContent,'Saved','after Save the form matches the whole-document response');
+console.log('PASS: blank speed serializes to null, rows missing a value are dropped, and a duplicate game voice path keeps the last row (documented last-wins).');
+async function dirtyWhen(mutate,label){const f=fixture();await flush();await flush();assert.equal(f.node('savedState').textContent,'Saved',label);mutate(f);f.events.get('config:input')();assert.equal(f.node('savedState').textContent,'Unsaved changes',label);assert.equal(f.node('saveReminder').hidden,false,label);}
+await dirtyWhen(f=>{f.node('ttsEnabled').checked=false},'ttsEnabled');
+await dirtyWhen(f=>{f.node('ttsBaseUrl').value='https://other.example/v1'},'ttsBaseUrl');
+await dirtyWhen(f=>{f.node('ttsModel').value='other-model'},'ttsModel');
+await dirtyWhen(f=>{f.node('ttsVoice').value='other-voice'},'ttsVoice');
+await dirtyWhen(f=>{f.node('ttsSpeed').value='2'},'ttsSpeed');
+await dirtyWhen(f=>{f.node('ttsApiKey').value='fresh-key'},'new ttsApiKey');
+await dirtyWhen(f=>{f.node('clearTtsApiKey').checked=true},'clearTtsApiKey');
+await dirtyWhen(f=>{f.node('ttsVoiceMap').children[0].children[1].value='echo'},'voice-map row edited');
+await dirtyWhen(f=>{const remove=[...f.events.keys()].find(k=>/dyn\d+-button:click/.test(k));f.events.get(remove)()},'voice-map row removed');
+await dirtyWhen(f=>{f.events.get('ttsMapAdd:click')();const row=f.node('ttsVoiceMap').children.at(-1);row.children[0].value='voice/new/caller';row.children[1].value='shimmer'},'voice-map row added');
+const emptyRow=fixture();await flush();await flush();emptyRow.events.get('ttsMapAdd:click')();
+assert.equal(emptyRow.node('savedState').textContent,'Saved','added-but-empty rows stay out of dirty detection');
+console.log('PASS: pendingChanges() flags every TTS field, the key clear checkbox, and voice-map row edits, additions and removals.');
+const t=fixture();await flush();await flush();
+t.node('baseUrl').value='https://unsaved.example/v1';t.events.get('config:input')();
+t.node('ttsModel').value='draft-model';t.node('ttsInput').value='Draft greeting';
+t.events.get('ttsTest:click')();await flush();await flush();await flush();
+const voiceCall=t.calls.find(c=>c.path==='/api/tts/test');
+assert.equal(voiceCall.method,'POST');
+assert.equal(voiceCall.body.ttsModel,'draft-model','Test Voice must send the draft model, not the saved one');
+assert.equal(voiceCall.body.ttsBaseUrl,'https://tts.example/v1');assert.equal(voiceCall.body.ttsVoice,'default-voice');assert.equal(voiceCall.body.ttsSpeed,1.25);
+assert.equal(voiceCall.body.ttsApiKey,'','a blank key asks the panel to reuse the saved secret');
+assert.equal(voiceCall.body.input,'Draft greeting');
+assert.equal(t.calls.filter(c=>c.path==='/api/config'&&c.method==='PUT').length,0,'Test Voice must never save settings');
+assert.equal(t.node('savedState').textContent,'Unsaved changes');
+assert.equal(t.blobs.length,1);assert.equal(t.played.length,1);assert.equal(t.played[0].tag,'audio');assert.match(String(t.played[0].src),/^blob:/);
+const wav=Buffer.from(t.blobs[0].parts[0]);
+assert.equal(wav.length,44);assert.equal(wav.subarray(0,4).toString('ascii'),'RIFF');assert.equal(wav.readUInt32LE(4),36+ttsPcm.length);
+assert.equal(wav.subarray(8,12).toString('ascii'),'WAVE');assert.equal(wav.subarray(12,16).toString('ascii'),'fmt ');
+assert.equal(wav.readUInt16LE(20),1,'PCM format');assert.equal(wav.readUInt16LE(22),1,'mono');assert.equal(wav.readUInt32LE(24),24000,'sample rate');assert.equal(wav.readUInt32LE(28),48000,'byte rate for 16-bit mono');assert.equal(wav.readUInt16LE(32),2,'block align');assert.equal(wav.readUInt16LE(34),16,'16-bit');
+assert.equal(wav.subarray(36,40).toString('ascii'),'data');assert.equal(wav.readUInt32LE(40),ttsPcm.length);
+assert.equal(Buffer.from(t.blobs[0].parts[1]).length,ttsPcm.length,'the raw provider PCM follows the header untouched');
+assert.deepEqual(Buffer.from(t.blobs[0].parts[1]),Buffer.from(ttsPcm),'the PCM tail bytes are exactly the stub provider input');
+assert.match(t.node('notice').textContent,/Played a sample with voice "default-voice"/);
+assert.match(t.node('notice').textContent,/These settings are not saved/);
+const silent=fixture();await flush();await flush();silent.events.get('ttsTest:click')();await flush();await flush();
+assert.equal(silent.calls.find(c=>c.path==='/api/tts/test').body.input,undefined,'a blank test text defers to the panel default greeting');
+const failed=fixture({ttsTest:'error'});await flush();await flush();failed.events.get('ttsTest:click')();await flush();await flush();
+assert.match(failed.node('notice').textContent,/The TTS provider denied access/);
+assert.equal(failed.node('notice').dataset.error,'true');
+assert.equal(failed.blobs.length,0);assert.equal(failed.played.length,0);
+assert.equal(failed.calls.filter(c=>c.path==='/api/config'&&c.method==='PUT').length,0);
+console.log('PASS: Test Voice posts draft values with a blank key, wraps raw PCM in a 44-byte RIFF/WAVE header before the blob: play, never saves, and shows normalized failures.');
+const hosted=fixture();await flush();await flush();
+hosted.node('manifestdex').checked=true;hosted.events.get('manifestdex:change')();
+assert.equal(hosted.node('baseUrl').disabled,true,'private text-provider fields still lock with ManifestDeX');
+for(const id of ['ttsEnabled','ttsBaseUrl','ttsModel','ttsVoice','ttsApiKey','clearTtsApiKey','ttsSpeed','ttsMapAdd','ttsTest'])assert.equal(hosted.node(id).disabled,false,'the custom voice stays editable in hosted mode: '+id);
+hosted.node('ttsBaseUrl').value='https://hosted-tts.example/v1';hosted.events.get('config:input')();
+assert.equal(hosted.node('savedState').textContent,'Unsaved changes','hosted TTS edits are still tracked as unsaved');
+hosted.events.get('config:submit')({preventDefault(){}});await flush();await flush();
+const hostedDoc=hosted.calls.filter(c=>c.path==='/api/config'&&c.method==='PUT').at(-1).body;
+assert.equal(hostedDoc.useManifestDeX,true);assert.equal(hostedDoc.ttsEnabled,true);assert.equal(hostedDoc.ttsBaseUrl,'https://hosted-tts.example/v1');
+assert.match(hosted.node('notice').textContent,/Saved\. New requests will use these settings/,'hosted submit must reach the panel');
+assert.match(hosted.node('activeSettings').textContent,/Game uses: ManifestDeX AI \+ custom voice/);
+assert.equal(hosted.node('savedState').textContent,'Saved');
+console.log('PASS: hosted mode keeps the whole TTS card editable and saveable while private text-provider fields stay locked, and the summary shows the custom voice.');
+// Dirty tracking must not depend on voice-map key order: delete a saved row, then re-add the identical pair at another position.
+const reorder=fixture();await flush();await flush();
+assert.equal(reorder.node('savedState').textContent,'Saved');
+const firstRemove=[...reorder.events.keys()].find(k=>/dyn\d+-button:click/.test(k));
+reorder.events.get(firstRemove)();
+assert.equal(reorder.node('savedState').textContent,'Unsaved changes','deleting a saved voice-map row is dirty');
+reorder.events.get('ttsMapAdd:click')();
+const readded=reorder.node('ttsVoiceMap').children.at(-1);readded.children[0].value='voice/player/anna';readded.children[1].value='alloy';
+reorder.events.get('config:input')();
+assert.equal(reorder.node('savedState').textContent,'Saved','the identical pair re-inserted at a different position matches the saved map again');
+assert.equal(reorder.node('saveReminder').hidden,true);
+console.log('PASS: pendingChanges() compares voice maps key-order-insensitively: deleting a saved row and re-adding the identical pair elsewhere returns to Saved.');
+const cap=fixture();await flush();await flush();
+for(let i=0;i<126;i++)cap.events.get('ttsMapAdd:click')();
+assert.equal(cap.node('ttsVoiceMap').children.length,128);
+cap.events.get('ttsMapAdd:click')();
+assert.equal(cap.node('ttsVoiceMap').children.length,128,'the add handler refuses a 129th row');
+assert.match(cap.node('notice').textContent,/at most 128/);
+console.log('PASS: Add voice mapping stops at the 128-row server limit with a short notice instead of adding a 129th row.');
+const twice=fixture();await flush();await flush();
+twice.events.get('ttsTest:click')();await flush();await flush();
+twice.events.get('ttsTest:click')();await flush();await flush();
+assert.equal(twice.played.length,2,'a second Test Voice click plays a fresh sample');
+assert.equal(twice.paused.length,1,'the previous sample is paused when a new one plays');
+assert.equal(twice.paused[0],twice.played[0]);
+console.log('PASS: a new voice sample pauses the previous one before playing.');

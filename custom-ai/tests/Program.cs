@@ -188,6 +188,8 @@ Check(TtsRejected(new(TtsSpeed: 0.1)) && TtsRejected(new(TtsSpeed: 4.5)) && TtsR
     !TtsRejected(new(TtsSpeed: 0.25)) && !TtsRejected(new(TtsSpeed: 4)) && !TtsRejected(new(TtsSpeed: null)), "TTS speed must be blank or between 0.25 and 4");
 Check(TtsRejected(new(TtsVoiceMap: new() { [""] = "alloy" })) && TtsRejected(new(TtsVoiceMap: new() { ["voice/player"] = "" })) &&
     TtsRejected(new(TtsVoiceMap: new() { ["voice\u0001player"] = "alloy" })) && TtsRejected(new(TtsVoiceMap: new() { ["voice/player"] = "all\u0000oy" })), "TTS voice map rejects empty or control-character entries");
+Check(TtsRejected(new(TtsVoice: "voice\nplayer")) && TtsRejected(new(TtsVoice: "voice\u0001player")) &&
+    !TtsRejected(new(TtsEnabled: true, TtsBaseUrl: "https://tts.example/v1", TtsModel: "m", TtsVoice: "normal-voice")), "default TTS voice rejects control characters");
 bool NullProviderVoiceRejected()
 {
     try { var parsed = JsonSerializer.Deserialize<Settings>("""{"ttsVoiceMap":{"voice/player":null}}""", SettingsStore.Json); return parsed is null || TtsRejected(parsed); }
@@ -299,6 +301,10 @@ var ttsOversizeTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBas
 var ttsOversizeBody = await ttsOversizeTest.Content.ReadAsStringAsync();
 Check(ttsOversizeTest.StatusCode == (HttpStatusCode)413 && JsonNode.Parse(ttsOversizeBody)!["error"]!.GetValue<string>() == "size" && requests == ttsOversizeBefore,
     "the browser TTS test rejects oversize draft input with 413 size before contacting the provider");
+var ttsControlBefore = requests;
+var ttsControlTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = url + "/tts", ttsModel = "voice-model", ttsVoice = "voice\u0001player" });
+Check(ttsControlTest.StatusCode == HttpStatusCode.BadRequest && JsonNode.Parse(await ttsControlTest.Content.ReadAsStringAsync())!["error"]!.GetValue<string>() == "config" && requests == ttsControlBefore,
+    "the browser TTS test rejects control characters in the draft voice before contacting the provider");
 var ttsFailedTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = url + "/tts-unauthorized", ttsModel = "voice-model", ttsVoice = "test-voice" });
 var ttsFailedBody = await ttsFailedTest.Content.ReadAsStringAsync();
 Check(ttsFailedTest.StatusCode == HttpStatusCode.BadGateway && JsonNode.Parse(ttsFailedBody)!["error"]!.GetValue<string>() == "auth" && !ttsFailedBody.Contains("secret-must-not-leak"),

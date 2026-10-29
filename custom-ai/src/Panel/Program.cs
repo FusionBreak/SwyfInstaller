@@ -140,6 +140,8 @@ public sealed class SettingsStore(string path)
             throw new ApiFailure(400, "config", "A TTS model ID is required.");
         if (requireConnection && string.IsNullOrWhiteSpace(s.TtsVoice))
             throw new ApiFailure(400, "config", "A default TTS voice is required for game voices without a mapping.");
+        if (s.TtsVoice.Any(char.IsControl))
+            throw new ApiFailure(400, "config", "The default TTS voice cannot contain control characters.");
         if (s.TtsApiKey.Contains('\r') || s.TtsApiKey.Contains('\n'))
             throw new ApiFailure(400, "config", "The TTS API key cannot contain line breaks.");
         if (s.TtsSpeed is < 0.25 or > 4 || s.TtsSpeed is double ttsSpeed && !double.IsFinite(ttsSpeed))
