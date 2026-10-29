@@ -5,9 +5,9 @@ const html=readFileSync(new URL('../src/Panel/index.html',import.meta.url),'utf8
 const script=html.split('<script nonce="__NONCE__">')[1].split('</script>')[0];
 const ttsPcm=Uint8Array.from({length:96},(_,i)=>i%251);
 // The game voice map uses last-wins on duplicate paths: the panel drops blank rows and a later row for the same path overrides an earlier one.
-function fixture({ttsTest='ok',ttsOn=true}={}){
+function fixture({ttsTest='ok',ttsOn=true,ttsVoiceMapJson=null}={}){
  const nodes=new Map(),events=new Map(),calls=[],blobs=[],played=[],paused=[];let dynamic=0;
- const server={enabled:true,useManifestDeX:false,baseUrl:'https://private.example/v1',model:'private-model',temperature:null,topP:null,maxTokens:null,outputMode:'schema',hasApiKey:true,ttsEnabled:ttsOn,ttsBaseUrl:'https://tts.example/v1',ttsModel:'voice-model',ttsVoice:'default-voice',ttsApiKey:ttsOn?'saved-tts-secret':'',ttsSpeed:ttsOn?1.25:null,ttsVoiceMap:ttsOn?{'voice/player/anna':'alloy','voice/npc/guard':'onyx'}:{}};
+ const server={enabled:true,useManifestDeX:false,baseUrl:'https://private.example/v1',model:'private-model',temperature:null,topP:null,maxTokens:null,outputMode:'schema',hasApiKey:true,ttsEnabled:ttsOn,ttsBaseUrl:'https://tts.example/v1',ttsModel:'voice-model',ttsVoice:'default-voice',ttsApiKey:ttsOn?'saved-tts-secret':'',ttsSpeed:ttsOn?1.25:null,ttsVoiceMap:ttsVoiceMapJson?JSON.parse(ttsVoiceMapJson):ttsOn?{'voice/player/anna':'alloy','voice/npc/guard':'onyx'}:{}};
  let saved={...server};
  const response=(status,body,headers={},bytes=null)=>({ok:status<400,status,headers:{get:name=>headers[name]??null},json:async()=>body,arrayBuffer:async()=>bytes??new ArrayBuffer(0)});
  const node=id=>nodes.get(id)||(()=>{const n={id,value:'',checked:false,disabled:false,hidden:false,dataset:{},children:[],textContent:'',className:'',addEventListener:(name,fn)=>events.set(id+':'+name,fn),replaceChildren(...v){this.children=v},append(...v){this.children.push(...v)},reportValidity:()=>true};nodes.set(id,n);return n})();
@@ -142,6 +142,26 @@ reorder.events.get('config:input')();
 assert.equal(reorder.node('savedState').textContent,'Saved','the identical pair re-inserted at a different position matches the saved map again');
 assert.equal(reorder.node('saveReminder').hidden,true);
 console.log('PASS: pendingChanges() compares voice maps key-order-insensitively: deleting a saved row and re-adding the identical pair elsewhere returns to Saved.');
+// Hand-edited settings.json protection: JSON.parse hands the panel "__proto__" as a real own property of the
+// voice map, so it must render, dirty-track and re-save like any other game voice path instead of being dropped.
+const proto=fixture({ttsVoiceMapJson:'{"voice/player/anna":"alloy","voice/npc/guard":"onyx","__proto__":"mystery-voice"}'});await flush();await flush();
+assert.equal(proto.node('ttsVoiceMap').children.length,3,'the __proto__ key renders its own row');
+assert.equal(proto.node('ttsVoiceMap').children.at(-1).children[0].value,'__proto__');assert.equal(proto.node('ttsVoiceMap').children.at(-1).children[1].value,'mystery-voice');
+assert.equal(proto.node('savedState').textContent,'Saved','a saved __proto__ mapping must not read as an unsaved change');
+const removeProto=[...proto.events.keys()].filter(k=>/dyn\d+-button:click/.test(k)).at(-1);
+proto.events.get(removeProto)();
+assert.equal(proto.node('savedState').textContent,'Unsaved changes','removing the __proto__ row is dirty');
+proto.events.get('ttsMapAdd:click')();
+const protoAgain=proto.node('ttsVoiceMap').children.at(-1);protoAgain.children[0].value='__proto__';protoAgain.children[1].value='mystery-voice';
+proto.events.get('config:input')();
+assert.equal(proto.node('savedState').textContent,'Saved','deleting the __proto__ row and re-adding the identical pair returns to Saved');
+proto.events.get('config:submit')({preventDefault(){}});await flush();await flush();
+const protoDoc=proto.calls.filter(c=>c.path==='/api/config'&&c.method==='PUT').at(-1).body;
+assert.ok(Object.hasOwn(protoDoc.ttsVoiceMap,'__proto__'),'fields() must emit the __proto__ key, not drop it');
+assert.equal(protoDoc.ttsVoiceMap['__proto__'],'mystery-voice','the __proto__ mapping survives the save round-trip');
+assert.equal(proto.node('ttsVoiceMap').children.length,3,'the saved response keeps the __proto__ row visible');
+assert.equal(proto.node('savedState').textContent,'Saved');
+console.log('PASS: a hand-edited "__proto__" voice-map key renders as its own row, dirty-tracks and re-adds like any path, and survives Save without being dropped.');
 const cap=fixture();await flush();await flush();
 for(let i=0;i<126;i++)cap.events.get('ttsMapAdd:click')();
 assert.equal(cap.node('ttsVoiceMap').children.length,128);

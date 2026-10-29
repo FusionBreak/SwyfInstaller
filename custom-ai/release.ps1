@@ -61,6 +61,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Release tests failed; nothing was published.' }
     node tests/signin-ui.test.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Sign-in UI tests failed; nothing was published.' }
+    node tests/tts-ui.test.mjs
+    if ($LASTEXITCODE -ne 0) { throw 'TTS UI tests failed; nothing was published.' }
     # Stop if files or HEAD changed while the build was running.
     $currentHead = git rev-parse HEAD
     if ($LASTEXITCODE -ne 0 -or $currentHead -ne $head) { throw 'HEAD changed during the build.' }
