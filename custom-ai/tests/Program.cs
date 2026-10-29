@@ -48,6 +48,7 @@ var fake = builder.Build();
 JsonObject? observed = null; string? observedAuth = null; int requests = 0;
 var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 const string greeting = "{\"dialogue\":\"Hello, I am listening.\",\"trust_percent\":50,\"emotion\":\"NEUTRAL\"}";
+var ttsPcm = new byte[512]; for (var i = 0; i < ttsPcm.Length; i++) ttsPcm[i] = (byte)(i % 251);
 JsonObject Response(string content) => new() { ["choices"] = new JsonArray(new JsonObject { ["message"] = new JsonObject { ["content"] = content } }) };
 fake.MapPost("/{**path}", async (HttpContext ctx) =>
 {
@@ -74,6 +75,13 @@ fake.MapPost("/{**path}", async (HttpContext ctx) =>
     if (path.Contains("invalid")) { await ctx.Response.WriteAsync("broken"); return; }
     if (path.Contains("oversize")) { await ctx.Response.WriteAsync(new string('x', Provider.MaxResponse + 10)); return; }
     if (path.Contains("wrong-schema")) { await ctx.Response.WriteAsJsonAsync(Response("{\"dialogue\":\"hi\"}")); return; }
+    if (path.Contains("tts"))
+    {
+        ctx.Response.ContentType = "application/octet-stream";
+        if (path.Contains("huge")) await ctx.Response.Body.WriteAsync(new byte[TtsProvider.MaxResponse + 4096]);
+        else await ctx.Response.Body.WriteAsync(ttsPcm);
+        return;
+    }
     var content = JsonNode.Parse(greeting)!;
     if (observed?["response_format"]?["json_schema"]?["name"]?.ToString() == "gameplay_caller_turn") content["completed_objectives"] = path.Contains("bad-objectives") ? new JsonArray(42) : new JsonArray();
     await ctx.Response.WriteAsJsonAsync(Response(content.ToJsonString()));
@@ -193,6 +201,42 @@ catch (ApiFailure e) { Check(e.Code == "config" && e.Message.Contains("128"), "o
 File.WriteAllText(ttsConfig, "broken-tts-json"); ttsReload.Load();
 Check(ttsReload.Read().Enabled && !ttsReload.Read().TtsEnabled && ttsReload.Read().TtsVoiceMap is null or { Count: 0 } && ttsReload.LoadError != null, "corrupt config still fails closed with TTS defaults off");
 
+// Custom TTS provider client: raw PCM speech with its own deadline and per-settings connection state.
+using var ttsProvider = new TtsProvider();
+var voiceSettings = new Settings(true, url + "/v1", "fake-model", "saved-secret", TtsEnabled: true, TtsBaseUrl: url + "/tts", TtsModel: "voice-model",
+    TtsVoice: "default-voice", TtsApiKey: "tts-secret", TtsSpeed: 1.25, TtsVoiceMap: new() { ["voice/player/anna"] = "alloy" });
+string TtsState(Settings s) => JsonSerializer.SerializeToNode(ttsProvider.ConnectionStatus(s, null))!["state"]!.GetValue<string>();
+Check(TtsState(voiceSettings) == "untested" && TtsState(voiceSettings with { TtsEnabled = false }) == "disabled" &&
+    TtsState(voiceSettings with { TtsModel = "other-model" }) == "untested", "new TTS provider starts untested and reports disabled or different models honestly");
+Check(TtsProvider.ResolveVoice(voiceSettings, "voice/player/anna") == "alloy" && TtsProvider.ResolveVoice(voiceSettings, "voice/npc/stranger") == "default-voice" &&
+    TtsProvider.ResolveVoice(voiceSettings, null) == "default-voice", "game voice paths resolve through the voice map with the default voice as fallback");
+var ttsBeforeLocalReject = requests;
+await Failure(async () => await ttsProvider.Synthesize("   ", "alloy", voiceSettings, default), "config");
+await Failure(async () => await ttsProvider.Synthesize(new string('a', TtsProvider.MaxInput + 1), "alloy", voiceSettings, default), "size");
+Check(requests == ttsBeforeLocalReject, "blank and oversize TTS text are rejected before any network request");
+var spokenPcm = await ttsProvider.Synthesize("Hello caller", "alloy", voiceSettings, default);
+Check(spokenPcm.SequenceEqual(ttsPcm), "successful TTS synthesis returns the raw PCM bytes");
+Check(observedAuth == "Bearer tts-secret" && observed!["model"]!.GetValue<string>() == "voice-model" && observed["voice"]!.GetValue<string>() == "alloy" &&
+    observed["input"]!.GetValue<string>() == "Hello caller" && observed["response_format"]!.GetValue<string>() == "pcm" && observed["speed"]!.GetValue<double>() == 1.25,
+    "TTS request posts model, voice, input, pcm response format, speed, and the Bearer key");
+await ttsProvider.Synthesize("Hello", "alloy", voiceSettings with { TtsSpeed = null }, default);
+Check(observed!["speed"] == null, "a blank TTS speed is omitted from the request");
+Check(TtsState(voiceSettings) == "success" && JsonSerializer.SerializeToNode(ttsProvider.ConnectionStatus(voiceSettings, null))!["completed"]!.GetValue<long>() >= 2 &&
+    JsonSerializer.SerializeToNode(ttsProvider.ConnectionStatus(voiceSettings, null))!["lastError"] is null, "successful TTS synthesis updates state and the completed counter");
+await ttsProvider.Synthesize("Hello", "alloy", voiceSettings with { TtsApiKey = "" }, default);
+Check(string.IsNullOrEmpty(observedAuth), "a keyless TTS request sends no Authorization header");
+Check(TtsState(voiceSettings with { Model = "other-llm-model", ApiKey = "other-llm-key" }) == "success" &&
+    TtsState(voiceSettings with { TtsModel = "other-voice-model" }) == "untested", "TTS state keys on TTS settings only: LLM edits keep a verified voice, a TTS model edit is untested");
+foreach (var pair in new[] { ("unauthorized", "auth"), ("missing", "model_or_endpoint"), ("rate", "rate_limit") })
+    await Failure(async () => await ttsProvider.Synthesize("Hello", "alloy", voiceSettings with { TtsBaseUrl = url + "/tts-" + pair.Item1 }, default), pair.Item2);
+var ttsDeniedMessage = "";
+try { await ttsProvider.Synthesize("Hello", "alloy", voiceSettings with { TtsBaseUrl = url + "/tts-unauthorized" }, default); } catch (ApiFailure e) { ttsDeniedMessage = e.Message; }
+Check(!ttsDeniedMessage.Contains("secret-must-not-leak") && TtsState(voiceSettings with { TtsBaseUrl = url + "/tts-unauthorized" }) == "error",
+    "TTS failures never leak the provider payload and update provider state");
+await Failure(async () => await ttsProvider.Synthesize("Hello", "alloy", voiceSettings with { TtsBaseUrl = url + "/tts-huge" }, default), "size");
+await Failure(async () => await ttsProvider.Synthesize("Hello", "alloy", voiceSettings with { TtsBaseUrl = url + "/tts-slow" }, default, deadlineSeconds: 1), "timeout");
+Check(TtsState(voiceSettings with { TtsBaseUrl = url + "/tts-slow" }) == "error", "TTS timeout updates provider state");
+
 // Exercise the actual companion process, security middleware, endpoints and EOF lifecycle.
 string browserToken = new('b', 48), internalToken = new('i', 48);
 var panelDll = Path.Combine(AppContext.BaseDirectory, "SWYF.CustomAI.Panel.dll");
@@ -231,6 +275,34 @@ Check(ttsDocument!["ttsEnabled"]!.GetValue<bool>() && ttsDocument["ttsBaseUrl"]!
     ttsDocument["ttsVoiceMap"]!["voice/player"]!.GetValue<string>() == "alloy" && ttsDocument["hasTtsApiKey"]!.GetValue<bool>() && ttsDocument["ttsApiKey"] is null, "config PUT saves and GET returns the whole TTS document");
 Check(!(await client.GetStringAsync("/api/config")).Contains("tts-http-secret") && !(await client.GetStringAsync("/api/config")).Contains("saved-secret"), "HTTP config masks both API keys");
 Check((await client.PutAsJsonAsync("/api/config", form with { ClearTtsApiKey = true })).IsSuccessStatusCode && !(await client.GetFromJsonAsync<JsonObject>("/api/config"))!["ttsEnabled"]!.GetValue<bool>(), "saving a form without TTS fields turns custom TTS back off");
+Check((await client.GetAsync("/")).Headers.TryGetValues("Content-Security-Policy", out var panelCsp) && panelCsp.Single().Contains("media-src blob:"), "the panel CSP allows blob audio so the browser can play voice tests");
+Check((await client.PostAsJsonAsync("/internal/tts/speech", new { text = "should not reach" })).StatusCode == HttpStatusCode.Unauthorized, "browser token cannot call internal TTS speech");
+Check((await client.PutAsJsonAsync("/api/config", ttsForm)).IsSuccessStatusCode, "custom TTS settings saved again for endpoint tests");
+var ttsDiskBefore = File.ReadAllText(panelConfig);
+var ttsDraftTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = url + "/tts", ttsModel = "draft-model", ttsVoice = "draft-voice", ttsApiKey = "draft-key", input = "Draft greeting" });
+Check(ttsDraftTest.IsSuccessStatusCode && ttsDraftTest.Content.Headers.ContentType?.MediaType == "application/octet-stream" &&
+    ttsDraftTest.Headers.TryGetValues("X-Tts-Sample-Rate", out var testRates) && testRates.Single() == "24000" &&
+    ttsDraftTest.Headers.TryGetValues("X-Tts-Voice", out var testVoices) && testVoices.Single() == "draft-voice" &&
+    (await ttsDraftTest.Content.ReadAsByteArrayAsync()).SequenceEqual(ttsPcm), "the browser TTS test streams raw PCM with sample-rate and voice headers");
+Check(observed!["model"]!.GetValue<string>() == "draft-model" && observedAuth == "Bearer draft-key" && observed["input"]!.GetValue<string>() == "Draft greeting",
+    "the browser TTS test sends the draft model, voice, and key for exactly one request");
+var ttsBlankKeyTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = url + "/tts", ttsModel = "voice-model", ttsVoice = "test-voice" });
+Check(ttsBlankKeyTest.IsSuccessStatusCode && observedAuth == "Bearer tts-http-secret" && observed!["input"]!.GetValue<string>() == TtsProvider.DefaultTestInput,
+    "a blank TTS test key reuses the saved secret and omitted input synthesizes the default greeting");
+Check(File.ReadAllText(panelConfig) == ttsDiskBefore && !(await client.GetStringAsync("/api/config")).Contains("draft-model") && !(await client.GetStringAsync("/api/config")).Contains("draft-key"),
+    "the browser TTS test never saves draft settings");
+var ttsInvalidBefore = requests;
+var ttsInvalidTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = "ftp://tts.invalid", ttsModel = "voice-model", ttsVoice = "test-voice" });
+Check(ttsInvalidTest.StatusCode == HttpStatusCode.BadRequest && requests == ttsInvalidBefore, "the browser TTS test validates the draft base URL before contacting the provider");
+var ttsOversizeBefore = requests;
+var ttsOversizeTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = url + "/tts", ttsModel = "voice-model", ttsVoice = "test-voice", input = new string('x', TtsProvider.MaxInput + 1) });
+var ttsOversizeBody = await ttsOversizeTest.Content.ReadAsStringAsync();
+Check(ttsOversizeTest.StatusCode == (HttpStatusCode)413 && JsonNode.Parse(ttsOversizeBody)!["error"]!.GetValue<string>() == "size" && requests == ttsOversizeBefore,
+    "the browser TTS test rejects oversize draft input with 413 size before contacting the provider");
+var ttsFailedTest = await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = url + "/tts-unauthorized", ttsModel = "voice-model", ttsVoice = "test-voice" });
+var ttsFailedBody = await ttsFailedTest.Content.ReadAsStringAsync();
+Check(ttsFailedTest.StatusCode == HttpStatusCode.BadGateway && JsonNode.Parse(ttsFailedBody)!["error"]!.GetValue<string>() == "auth" && !ttsFailedBody.Contains("secret-must-not-leak"),
+    "the browser TTS test returns the normalized failure without provider payloads");
 client.DefaultRequestHeaders.Remove("X-CustomAI-Token"); client.DefaultRequestHeaders.Add("X-CustomAI-Token", internalToken);
 Check((await client.GetFromJsonAsync<JsonObject>("/internal/status"))!["state"]!.GetValue<string>() == "success", "game status reflects saved provider test");
 Check((await client.PostAsJsonAsync("/internal/chat/completions", input)).IsSuccessStatusCode, "internal request forwarded");
@@ -244,6 +316,30 @@ File.Delete(httpSchemaPath);
 Check((await client.PostAsJsonAsync("/internal/chat/completions",omittedFormat)).StatusCode==HttpStatusCode.BadRequest && requests==sentBeforeMissing,"missing dialogue schema fails before sending a model request");
 Check(!(await client.GetStringAsync("/internal/status")).Contains("saved-secret"), "game status does not expose API credentials");
 Check((await client.GetAsync("/api/config")).StatusCode == HttpStatusCode.Unauthorized, "internal token cannot read browser config");
+Check((await client.PostAsJsonAsync("/api/tts/test", new { ttsBaseUrl = url + "/tts", ttsModel = "voice-model", ttsVoice = "test-voice" })).StatusCode == HttpStatusCode.Unauthorized, "internal token cannot call the browser TTS test");
+var gameSpeech = await client.PostAsJsonAsync("/internal/tts/speech", new { text = "Guards incoming", voicePath = "voice/player" });
+Check(gameSpeech.IsSuccessStatusCode && gameSpeech.Headers.TryGetValues("X-Tts-Sample-Rate", out var gameRates) && gameRates.Single() == "24000" &&
+    gameSpeech.Headers.TryGetValues("X-Tts-Voice", out var mappedVoices) && mappedVoices.Single() == "alloy" &&
+    (await gameSpeech.Content.ReadAsByteArrayAsync()).SequenceEqual(ttsPcm) && observed!["voice"]!.GetValue<string>() == "alloy" &&
+    observed["input"]!.GetValue<string>() == "Guards incoming" && observedAuth == "Bearer tts-http-secret", "game speech maps the voice path, uses the saved key, and returns provider PCM");
+var fallbackSpeech = await client.PostAsJsonAsync("/internal/tts/speech", new { text = "Who goes there", voicePath = (string?)null });
+Check(fallbackSpeech.IsSuccessStatusCode && fallbackSpeech.Headers.TryGetValues("X-Tts-Voice", out var fallbackVoices) && fallbackVoices.Single() == "default-voice" &&
+    observed!["voice"]!.GetValue<string>() == "default-voice", "an unmapped game voice uses the default provider voice");
+var emptySpeech = await client.PostAsJsonAsync("/internal/tts/speech", new { text = "   " });
+Check(emptySpeech.StatusCode == HttpStatusCode.BadRequest && (await emptySpeech.Content.ReadFromJsonAsync<JsonObject>())!["error"]!.GetValue<string>() == "config", "blank game speech text is rejected");
+var gameStatus = await client.GetFromJsonAsync<JsonObject>("/internal/status");
+Check(gameStatus!["state"]!.GetValue<string>() == "success" && gameStatus["tts"]!["state"]!.GetValue<string>() == "success" &&
+    gameStatus["tts"]!["model"]!.GetValue<string>() == "voice-model" && gameStatus["tts"]!["lastError"] is null &&
+    gameStatus["tts"]!["completed"]!.GetValue<long>() >= 2 && !gameStatus.ToJsonString().Contains("tts-http-secret"), "internal status reports the TTS block without exposing the key");
+client.DefaultRequestHeaders.Remove("X-CustomAI-Token"); client.DefaultRequestHeaders.Add("X-CustomAI-Token", browserToken);
+Check((await client.PutAsJsonAsync("/api/config", form with { ClearTtsApiKey = true })).IsSuccessStatusCode, "custom TTS switched back off for the disabled path");
+client.DefaultRequestHeaders.Remove("X-CustomAI-Token"); client.DefaultRequestHeaders.Add("X-CustomAI-Token", internalToken);
+var speechBeforeDisabled = requests;
+var speechDisabled = await client.PostAsJsonAsync("/internal/tts/speech", new { text = "Silence" });
+Check(speechDisabled.StatusCode == HttpStatusCode.Conflict && JsonNode.Parse(await speechDisabled.Content.ReadAsStringAsync())!["error"]!.GetValue<string>() == "disabled" &&
+    requests == speechBeforeDisabled, "disabled custom TTS answers 409 before reaching the provider");
+var disabledStatus = await client.GetFromJsonAsync<JsonObject>("/internal/status");
+Check(disabledStatus!["tts"]!["state"]!.GetValue<string>() == "disabled" && disabledStatus["tts"]!["lastError"] is null, "disabled custom TTS reports disabled state without error churn");
 panel.StandardInput.Close(); await panel.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(6)); Check(panel.ExitCode == 0, "helper shuts down on parent pipe EOF");
 
 // Disposable copies only: real game remains untouched by this test.

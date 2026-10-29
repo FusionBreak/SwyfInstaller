@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
@@ -107,28 +108,7 @@ public sealed class SettingsStore(string path)
 
     public static void Validate(Settings s, bool requireConnection)
     {
-        if (s.TtsEnabled || !string.IsNullOrEmpty(s.TtsBaseUrl))
-        {
-            if (!Uri.TryCreate(s.TtsBaseUrl, UriKind.Absolute, out var ttsUri) ||
-                ttsUri.Scheme is not ("http" or "https") || ttsUri.UserInfo != "" || ttsUri.Query != "" || ttsUri.Fragment != "")
-                throw new ApiFailure(400, "config", "The TTS base URL must be an HTTP(S) address without credentials, a query string, or a fragment.");
-        }
-        if (s.TtsEnabled && string.IsNullOrWhiteSpace(s.TtsModel))
-            throw new ApiFailure(400, "config", "A TTS model ID is required.");
-        if (s.TtsEnabled && string.IsNullOrWhiteSpace(s.TtsVoice))
-            throw new ApiFailure(400, "config", "A default TTS voice is required for game voices without a mapping.");
-        if (s.TtsApiKey.Contains('\r') || s.TtsApiKey.Contains('\n'))
-            throw new ApiFailure(400, "config", "The TTS API key cannot contain line breaks.");
-        if (s.TtsSpeed is < 0.25 or > 4 || s.TtsSpeed is double ttsSpeed && !double.IsFinite(ttsSpeed))
-            throw new ApiFailure(400, "config", "The TTS speed must be blank or between 0.25 and 4.");
-        if (s.TtsVoiceMap is { } voiceMap)
-        {
-            if (voiceMap.Count > MaxTtsVoiceMapEntries)
-                throw new ApiFailure(400, "config", $"The TTS voice map can contain at most {MaxTtsVoiceMapEntries} game voices.");
-            if (voiceMap.Any(e => string.IsNullOrWhiteSpace(e.Key) || string.IsNullOrWhiteSpace(e.Value) ||
-                e.Key.Any(char.IsControl) || e.Value.Any(char.IsControl)))
-                throw new ApiFailure(400, "config", "TTS voice map entries need a game voice path and a provider voice without control characters.");
-        }
+        ValidateTts(s, s.TtsEnabled);
         if (s.UseManifestDeX) return; // Fixed HTTPS endpoint and scoped ticket are owned by ManifestDeXClient.
         if (requireConnection || !string.IsNullOrEmpty(s.BaseUrl))
         {
@@ -145,6 +125,33 @@ public sealed class SettingsStore(string path)
             throw new ApiFailure(400, "config", "Temperature must be 0-2, top_p 0-1, and the token limit 1-131072.");
         if (s.OutputMode is not ("schema" or "json"))
             throw new ApiFailure(400, "config", "Invalid output mode.");
+    }
+
+    // TTS document validation. requireConnection mirrors TtsEnabled so /api/tts/test can verify draft settings before they are saved.
+    public static void ValidateTts(Settings s, bool requireConnection)
+    {
+        if (requireConnection || !string.IsNullOrEmpty(s.TtsBaseUrl))
+        {
+            if (!Uri.TryCreate(s.TtsBaseUrl, UriKind.Absolute, out var ttsUri) ||
+                ttsUri.Scheme is not ("http" or "https") || ttsUri.UserInfo != "" || ttsUri.Query != "" || ttsUri.Fragment != "")
+                throw new ApiFailure(400, "config", "The TTS base URL must be an HTTP(S) address without credentials, a query string, or a fragment.");
+        }
+        if (requireConnection && string.IsNullOrWhiteSpace(s.TtsModel))
+            throw new ApiFailure(400, "config", "A TTS model ID is required.");
+        if (requireConnection && string.IsNullOrWhiteSpace(s.TtsVoice))
+            throw new ApiFailure(400, "config", "A default TTS voice is required for game voices without a mapping.");
+        if (s.TtsApiKey.Contains('\r') || s.TtsApiKey.Contains('\n'))
+            throw new ApiFailure(400, "config", "The TTS API key cannot contain line breaks.");
+        if (s.TtsSpeed is < 0.25 or > 4 || s.TtsSpeed is double ttsSpeed && !double.IsFinite(ttsSpeed))
+            throw new ApiFailure(400, "config", "The TTS speed must be blank or between 0.25 and 4.");
+        if (s.TtsVoiceMap is { } voiceMap)
+        {
+            if (voiceMap.Count > MaxTtsVoiceMapEntries)
+                throw new ApiFailure(400, "config", $"The TTS voice map can contain at most {MaxTtsVoiceMapEntries} game voices.");
+            if (voiceMap.Any(e => string.IsNullOrWhiteSpace(e.Key) || string.IsNullOrWhiteSpace(e.Value) ||
+                e.Key.Any(char.IsControl) || e.Value.Any(char.IsControl)))
+                throw new ApiFailure(400, "config", "TTS voice map entries need a game voice path and a provider voice without control characters.");
+        }
     }
 
     public object Public() { var s = Read(); return new { s.Enabled, s.BaseUrl, s.Model, hasApiKey = s.ApiKey.Length > 0,
@@ -330,6 +337,7 @@ public static class Program
         var app = builder.Build();
         var store = new SettingsStore(startup.ConfigPath); store.Load();
         using var provider = new Provider();
+        using var tts = new TtsProvider();
         using var manifest = new ManifestDeXClient(startup.ConfigPath, provider);
         int port = 0;
         app.Use(async (ctx, next) =>
@@ -362,7 +370,7 @@ public static class Program
             var resource = Assembly.GetExecutingAssembly().GetManifestResourceNames().Single(n => n.EndsWith("index.html"));
             using var reader = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream(resource)!);
             var nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(24));
-            ctx.Response.Headers.ContentSecurityPolicy = $"default-src 'none'; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; img-src https://api.manifestdex.com; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+            ctx.Response.Headers.ContentSecurityPolicy = $"default-src 'none'; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; img-src https://api.manifestdex.com; media-src blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
             ctx.Response.ContentType = "text/html; charset=utf-8";
             await ctx.Response.WriteAsync((await reader.ReadToEndAsync()).Replace("__NONCE__", nonce));
         });
@@ -381,7 +389,12 @@ public static class Program
         app.MapPost("/api/manifestdex/disconnect", async(HttpContext ctx) => { await manifest.DisconnectRemote(ctx.RequestAborted); return Results.Json(new { ok = true }); });
         app.MapGet("/api/status", () => Results.Json(new { ready = true, completed = Interlocked.Read(ref provider.Completed),
             lastError = provider.LastError, loadError = store.LoadError, deadlineSeconds = 15 }));
-        app.MapGet("/internal/status", () => Results.Json(provider.ConnectionStatus(manifest.Effective(store.Read()), store.LoadError)));
+        app.MapGet("/internal/status", () =>
+        {
+            var status = JsonSerializer.SerializeToNode(provider.ConnectionStatus(manifest.Effective(store.Read()), store.LoadError), SettingsStore.Json)!.AsObject();
+            status["tts"] = JsonSerializer.SerializeToNode(tts.ConnectionStatus(store.Read(), store.LoadError), SettingsStore.Json);
+            return Results.Json(status);
+        });
         app.MapPost("/api/test", async (HttpContext ctx) =>
         {
             var input = await ctx.Request.ReadFromJsonAsync<SettingsInput>() ?? throw new JsonException();
@@ -403,6 +416,20 @@ public static class Program
             catch { throw new ApiFailure(502, "schema", "Connected, but the model did not follow the game response schema. Try another model or output mode."); }
             return Results.Json(new { ok = true, elapsedMs = watch.ElapsedMilliseconds, message = "Connection and game response schema verified." });
         });
+        app.MapPost("/api/tts/test", async (HttpContext ctx) =>
+        {
+            var input = await ctx.Request.ReadFromJsonAsync<TtsTestInput>() ?? throw new JsonException();
+            // Draft values are validated and used for exactly one synthesis; the saved settings document is never written.
+            var draft = new Settings(TtsEnabled: true, TtsBaseUrl: (input.TtsBaseUrl ?? "").Trim().TrimEnd('/'), TtsModel: (input.TtsModel ?? "").Trim(),
+                TtsVoice: (input.TtsVoice ?? "").Trim(), TtsApiKey: string.IsNullOrWhiteSpace(input.TtsApiKey) ? store.Read().TtsApiKey : input.TtsApiKey,
+                TtsSpeed: input.TtsSpeed);
+            SettingsStore.Validate(draft, false);
+            var text = string.IsNullOrWhiteSpace(input.Input) ? TtsProvider.DefaultTestInput : input.Input;
+            var pcm = await tts.Synthesize(text, draft.TtsVoice, draft, ctx.RequestAborted);
+            ctx.Response.Headers["X-Tts-Sample-Rate"] = TtsProvider.SampleRate.ToString(CultureInfo.InvariantCulture);
+            ctx.Response.Headers["X-Tts-Voice"] = draft.TtsVoice;
+            return Results.Bytes(pcm, "application/octet-stream");
+        });
         app.MapPost("/internal/chat/completions", async (HttpContext ctx) =>
         {
             var settings = store.Read();
@@ -413,6 +440,21 @@ public static class Program
             var body = JsonNode.Parse(bytes) as JsonObject ?? throw new JsonException();
             body = GameProbe.PrepareCompletion(body, startup.ConfigPath);
             return Results.Json(await provider.Complete(body, settings, ctx.Request.Headers["X-CustomAI-Background"] == "1", ctx.RequestAborted));
+        });
+        app.MapPost("/internal/tts/speech", async (HttpContext ctx) =>
+        {
+            var settings = store.Read();
+            if (!settings.TtsEnabled) throw new ApiFailure(409, "disabled", "Custom TTS is disabled; game dialogue will not use the custom voice.");
+            if (store.LoadError != null) throw new ApiFailure(503, "config", store.LoadError);
+            var bytes = await Provider.ReadBounded(ctx.Request.Body, Provider.MaxRequest, ctx.RequestAborted);
+            var body = JsonNode.Parse(bytes) as JsonObject ?? throw new JsonException();
+            var text = body["text"] is JsonValue textValue && textValue.TryGetValue<string>(out var spoken) ? spoken : null;
+            if (string.IsNullOrWhiteSpace(text)) throw new ApiFailure(400, "config", "TTS requires text to speak.");
+            var voice = TtsProvider.ResolveVoice(settings, body["voicePath"] is JsonValue voicePathNode && voicePathNode.TryGetValue<string>(out var voicePath) ? voicePath : null);
+            var pcm = await tts.Synthesize(text, voice, settings, ctx.RequestAborted);
+            ctx.Response.Headers["X-Tts-Sample-Rate"] = TtsProvider.SampleRate.ToString(CultureInfo.InvariantCulture);
+            ctx.Response.Headers["X-Tts-Voice"] = voice;
+            return Results.Bytes(pcm, "application/octet-stream");
         });
         await app.StartAsync();
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
