@@ -249,9 +249,18 @@ namespace Swyf.CustomAI
         // Installer gates for the custom voice path (custom-ai/docs/tts-integration-notes.md §9.11). Returning false
         // means the untouched game Speak/SpeakTracked bodies run. The decision is synchronous and side-effect-free,
         // and the panel is already bootstrapped by TryComplete before any caller speech can happen.
-        public static bool TrySpeak(string text, string voicePath, uint callNetId) => TtsRuntime.TrySpeak(text, voicePath, callNetId);
+        // Final gate spelling for the future T5 Cecil installer (§9.11 item 11): PREPEND to the 5-parameter
+        // Speak(string, string, uint, string, bool) a push of its five original arguments plus
+        // "call static Swyf.CustomAI.Runtime::TrySpeak(string, string, uint, string, bool)", then ret on true
+        // (handled) or brfalse back to the original first instruction on false. PREPEND to
+        // SpeakTracked(string, string, uint, uint, string) a push of its five original arguments plus
+        // "call static Swyf.CustomAI.Runtime::TrySpeakTracked(string, string, uint, uint, string, bool)" with
+        // isFiller = false (vanilla SpeakTracked never enqueues fillers), same ret/brfalse fall-through.
+        public static bool TrySpeak(string text, string voicePath, uint callNetId, string? languageCode, bool isFiller)
+            => TtsRuntime.TrySpeak(text, voicePath, callNetId, languageCode, isFiller);
 
-        public static bool TrySpeakTracked(string text, string voicePath, uint callNetId, uint completionToken) => TtsRuntime.TrySpeakTracked(text, voicePath, callNetId, completionToken);
+        public static bool TrySpeakTracked(string text, string voicePath, uint callNetId, uint completionToken, string? languageCode, bool isFiller)
+            => TtsRuntime.TrySpeakTracked(text, voicePath, callNetId, completionToken, languageCode, isFiller);
 
         // Refresh the cached ttsEnabled flag. Opt-in like the panel schema: a missing file or key keeps it false.
         public static void ReadTtsEnabled() => TtsRuntime.Enabled = ReadTtsFlag();

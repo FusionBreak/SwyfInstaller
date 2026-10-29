@@ -47,11 +47,12 @@ namespace Swyf.CustomAI
         private static MethodInfo? beginTranscript, isBusyForCall, speakOriginal;
         private static PropertyInfo? languageCurrent, languageCode;
 
-        public static bool TrySpeak(string text, string voicePath, uint callNetId) => TryHandoff(text, voicePath, callNetId, 0u);
+        public static bool TrySpeak(string text, string voicePath, uint callNetId, string? languageCode, bool isFiller)
+            => TryHandoff(text, voicePath, callNetId, 0u, languageCode, isFiller);
 
         // Vanilla SpeakTracked drops token==0 requests; hijacking that case would change behaviour, so it is left to vanilla.
-        public static bool TrySpeakTracked(string text, string voicePath, uint callNetId, uint completionToken)
-            => completionToken != 0 && TryHandoff(text, voicePath, callNetId, completionToken);
+        public static bool TrySpeakTracked(string text, string voicePath, uint callNetId, uint completionToken, string? languageCode, bool isFiller)
+            => completionToken != 0 && TryHandoff(text, voicePath, callNetId, completionToken, languageCode, isFiller);
 
         internal static bool IsReservedCallNetId(uint callNetId)
             => callNetId == ReviewNarrationCallNetId || (callNetId >= PreviewCallNetIdLow && callNetId <= PreviewCallNetIdHigh);
@@ -59,10 +60,13 @@ namespace Swyf.CustomAI
         // The whole §9.11 gate decision as a pure static function: synchronous and side-effect-free, so the
         // decision itself can be unit-tested headlessly. False lets the untouched shipped body run; a true
         // answer means the caller may still lose the race to an error, which the handoff handles as a decline.
-        internal static bool ShouldHijack(string text, uint callNetId, uint completionToken, bool fallbackReentry, bool ttsEnabled, bool panelAvailable, bool singletonReady)
+        // isFiller keeps the shipped CallerFillerWords settings gate (§2.1); languageCode is a pure passthrough
+        // carried verbatim for the request and never changes the decision.
+        internal static bool ShouldHijack(string text, uint callNetId, uint completionToken, bool isFiller, string? languageCode, bool fallbackReentry, bool ttsEnabled, bool panelAvailable, bool singletonReady)
         {
             if (fallbackReentry) return false;                       // §9.11: the post-failure replay must fall through.
             if (!ttsEnabled) return false;                           // Opt-in; the shipped provider answers while false.
+            if (isFiller) return false;                              // §2.1: filler words stay vanilla with their own settings gate.
             if (string.IsNullOrWhiteSpace(text)) return false;       // §2.1 gate; vanilla would drop it anyway.
             if (IsReservedCallNetId(callNetId)) return false;        // §8 recommendations: never hijack these.
             if (callNetId == 0) return false;                        // Silent non-call speech stays vanilla.
@@ -80,15 +84,15 @@ namespace Swyf.CustomAI
 
         // §9.11: the decision must be synchronous and side-effect-free; only the final enqueue mutates state.
         // Any false lets the completely untouched original Speak/SpeakTracked body run.
-        private static bool TryHandoff(string text, string voicePath, uint callNetId, uint completionToken)
+        private static bool TryHandoff(string text, string voicePath, uint callNetId, uint completionToken, string? languageCode, bool isFiller)
         {
             try
             {
                 var panelAvailable = Runtime.PanelReady;
                 var singletonReady = panelAvailable && SingletonReady();
-                if (!ShouldHijack(text, callNetId, completionToken, replaying, Enabled, panelAvailable, singletonReady)) return false;
+                if (!ShouldHijack(text, callNetId, completionToken, isFiller, languageCode, replaying, Enabled, panelAvailable, singletonReady)) return false;
                 if (Singleton == null) return false;                 // Defensive re-check; the singleton vanished mid-decision.
-                var job = new Job(text, voicePath ?? "", callNetId, completionToken);
+                var job = new Job(text, voicePath ?? "", callNetId, completionToken, languageCode);
                 lock (gate)
                 {
                     queue.Enqueue(job);
@@ -184,13 +188,14 @@ namespace Swyf.CustomAI
 
         // §9.11 fallback: hand a line that was never heard back to the untouched shipped path. Always with
         // token 0: a tracked request's token was already reported exactly once before the replay, and
-        // re-reporting is forbidden by §6 (the Completed flag would drop it anyway).
+        // re-reporting is forbidden by §6 (the Completed flag would drop it anyway). The caller's languageCode
+        // is replayed verbatim; null lets the shipped body resolve its own default (§1).
         private static void ReplayToVanilla(Job job)
         {
             try
             {
                 replaying = true;
-                speakOriginal!.Invoke(null, new object?[] { job.Text, job.VoicePath, job.CallNetId, CurrentLanguageCode(), false });
+                speakOriginal!.Invoke(null, new object?[] { job.Text, job.VoicePath, job.CallNetId, job.LanguageCode, false });
             }
             catch (Exception e) { Debug.LogWarning("[CustomAI] Custom voice could not fall back to the original path: " + e.GetType().Name); }
             finally { replaying = false; }
@@ -222,13 +227,14 @@ namespace Swyf.CustomAI
         private sealed class Job
         {
             public readonly string Text, VoicePath;
+            public readonly string? LanguageCode;    // Caller's language, or null = resolve the default at activation (§9.1).
             public readonly uint CallNetId, CompletionToken;
             public object? Request;      // The game's TtsRequest once activated; null means "never activated".
             public byte[]? Pcm;          // Raw 24 kHz mono s16le from the panel.
             public int Position;         // Samples consumed.
             public bool Fetching, Failed, Done, Heard, AwaitingTail;
-            public Job(string text, string voicePath, uint callNetId, uint completionToken)
-            { Text = text; VoicePath = voicePath; CallNetId = callNetId; CompletionToken = completionToken; }
+            public Job(string text, string voicePath, uint callNetId, uint completionToken, string? languageCode)
+            { Text = text; VoicePath = voicePath; CallNetId = callNetId; CompletionToken = completionToken; LanguageCode = languageCode; }
         }
 
         // §4 frame geometry, identical to every built-in provider.
@@ -261,14 +267,17 @@ namespace Swyf.CustomAI
                 var job = active;
                 if (job == null) return;
 
-                // Global abort conditions, checked before any pacing (§7, §9.9).
-                if (!Enabled) { Finish(job, report: true, succeeded: false, replay: false); return; }
+                // Global abort conditions, checked before any pacing (§7, §9.9). Flipping the setting off is an
+                // ordinary abort: a line that was never heard still replays so the shipped voice says it (§9.11).
+                if (!Enabled) { Finish(job, report: true, succeeded: false, replay: !job.Heard); return; }
                 var singleton = Singleton;
                 // A destroyed singleton means the game's OnDisable already force-cancelled and reported everything (§7).
                 if (singleton == null) { Finish(job, report: false, succeeded: false, replay: false); return; }
                 // §9.9: if the game replaced currentRequest (watchdog, interrupt), it owns the teardown from here on.
+                // The tracked failure is still reported (§6.4: silence costs a scripted ending 120 s); ReportTracked-
+                // Completion is idempotent via Completed, so a game-side report of the same request never doubles.
                 if (job.Request != null && fCurrentRequest!.GetValue(singleton) != job.Request)
-                { Finish(job, report: false, succeeded: false, replay: false); return; }
+                { Finish(job, report: true, succeeded: false, replay: false); return; }
                 // §7: CancelCall sets Cancelled on the active request; the shim reports the failure itself.
                 if (job.Request != null && (bool)rCancelled!.GetValue(job.Request)!)
                 { Finish(job, report: true, succeeded: false, replay: false); return; }
@@ -379,7 +388,9 @@ namespace Swyf.CustomAI
                     SetRequest(job, "CallNetId", job.CallNetId);
                     SetRequest(job, "CompletionToken", job.CompletionToken);
                     SetRequest(job, "IsFiller", false);
-                    SetRequest(job, "LanguageCode", CurrentLanguageCode());
+                    // The caller's explicit language wins; null/empty falls back to the shipped default
+                    // resolution, mirroring EnqueueSpeak's languageCode ?? CallLanguage.Current.Code (§9.1).
+                    SetRequest(job, "LanguageCode", string.IsNullOrEmpty(job.LanguageCode) ? CurrentLanguageCode() : job.LanguageCode);
                     SetRequest(job, "VoicePath", job.VoicePath);
                     SetRequest(job, "SpokenText", job.Text);
                     SetRequest(job, "FullTranscript", job.Text);
@@ -406,9 +417,8 @@ namespace Swyf.CustomAI
                     else
                     {
                         lock (gate) if (queue.Count > 0 && queue.Peek() == job) queue.Dequeue();
-                        var activated = job.Request != null;
                         DropQueued(job);
-                        if (!activated && !job.Heard) ReplayToVanilla(job);
+                        if (!job.Heard) ReplayToVanilla(job);   // Request == null here: never activated, so an unheard line goes back to the shipped path.
                     }
                 }
             }
@@ -454,13 +464,24 @@ namespace Swyf.CustomAI
                 if (job.Request != null)
                 {
                     // §9.8: on failure report before tearing down; PublishFailedTranscript matches against currentRequest.
+                    // Deliberately outside the is-current guard below: the game may already own the request, and
+                    // ReportTrackedCompletion is idempotent via request.Completed (§6), so a failure report can
+                    // never double-fire, while dropping it could stall a scripted ending for 120 s (§6.4).
                     if (report && !succeeded)
                     {
                         try { reportCompletion!.Invoke(job.Request, false); }
                         catch (Exception e) { Debug.LogWarning("[CustomAI] Custom voice completion could not be reported: " + e.GetType().Name); }
                     }
-                    if (singleton != null)
+                    // §9 item 9: only touch the singleton's fields while its currentRequest is still ours; once
+                    // the game replaced it (watchdog, interrupt) it owns the teardown. A reflection failure here
+                    // counts as "not current": state that cannot be verified is left alone.
+                    var isCurrent = false;
+                    try { isCurrent = singleton != null && fCurrentRequest!.GetValue(singleton) == job.Request; }
+                    catch (Exception e) { Debug.LogWarning("[CustomAI] Custom voice could not verify the current request: " + e.GetType().Name); }
+                    if (isCurrent)
                     {
+                        // Invariant: succeeded:true implies isCurrent, because the tick-top identity check
+                        // precedes the only success call site (the §9.7 end-drain) within the same tick.
                         try
                         {
                             fActiveCallNetId!.SetValue(singleton, 0u);
