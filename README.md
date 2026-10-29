@@ -5,21 +5,26 @@ Only the **lobby host** needs the mod — guests join normally.
 
 Press **F8** or click **AI Settings** in the main or pause menu to configure
 your provider in a local browser panel. Guests use the game's existing
-networking and local voice synthesis.
+networking; every caller voice — including your optional custom voice —
+reaches them through the game's own audio relay.
 
 - Set the API Base URL, API key, and model without restarting the game.
 - Test the connection and the structured response format expected by callers.
 - See the saved game provider while testing a draft. **Test Connection** does
   not save; **Save Settings** applies the selection to the game.
 - Optionally override temperature, top-p, and response token limits.
+- Optionally replace the callers' built-in voices with a **custom voice** from
+  an OpenAI-compatible text-to-speech provider. Everyone in the call hears
+  it; guests need nothing.
 - See custom-provider status in the main menu instead of the original AI
   sign-in status.
 - With custom AI enabled and saved, play without signing in to the game's AI
   service in a browser. Steam must still be connected for lobbies. Turning
   custom AI off restores the game's original sign-in requirement.
 
-This mod replaces the text-generation provider. Speech recognition and voice
-synthesis are handled by the game and are not modified.
+This mod replaces the text-generation provider and — when you enable it — the
+game's built-in caller voice synthesis. Speech recognition is never modified
+and always runs on this computer.
 
 ## Get started in 3 steps (recommended)
 
@@ -180,7 +185,11 @@ Custom-provider failures never switch to the original paid/game-credit service.
 ### Multiplayer and voice
 
 AI requests are made by the **host**. Guests do not need the mod or your API
-key. The mod changes text generation, not speech recognition or synthesis.
+key. The mod changes text generation and, with
+[Custom voice](#custom-voice-optional) enabled, synthesizes caller speech on
+the computer that speaks the line; listeners — modded or not — receive that
+audio through the game's own voice relay. Speech recognition is never
+modified.
 
 ### Connection status
 
@@ -188,6 +197,63 @@ With custom AI enabled, the main menu shows the configured model and one of
 these states: **Not tested yet**, **Connecting**,
 **Last request succeeded**, **Connection error** (details in the panel).
 Disabling custom AI restores the original game's AI provider and status display.
+
+## Custom voice (optional)
+
+Replace the game's built-in caller voices with any OpenAI-compatible
+text-to-speech provider (`POST {base}/audio/speech`, raw PCM). The custom
+voice is independent of your text provider: it works with your own provider
+and with **Use ManifestDeX AI** alike, and it stays off until you enable and
+save it (**Use a custom text-to-speech provider** is written to
+`<game>/CustomAI/settings.json`).
+
+Speech synthesis runs **only on the computer that speaks the line** — the
+**host** in a typical lobby. The generated audio then reaches every listener
+through the game's own voice relay, so **all players in the call hear the
+custom voice, including guests without the mod**. Guests never contact your
+TTS provider and need no key. Calls played on another player's computer —
+for example the caller voices in an unmodded guest's own calls — stay on that
+machine's built-in voice.
+
+Set it up in F8 / AI Settings:
+
+1. Tick **Use a custom text-to-speech provider**.
+2. Enter the **TTS API Base URL**, for example `http://127.0.0.1:8081/v1`.
+   The mod appends `/audio/speech`; do not include that suffix yourself.
+   Keyless local servers work.
+3. Enter the exact **TTS model ID** accepted by your provider.
+4. Enter a **Default voice** (provider voice ID). It is used for every game
+   voice without a mapping below.
+5. Enter a **TTS API key** if your provider requires one. When a key is
+   already saved, leaving the field blank preserves it;
+   **Delete saved API key** removes it. Optionally set **Speech speed**
+   (0.25–4; blank keeps the provider default).
+6. Optionally map individual voices under **Per-caller voice mapping**: one
+   row per **Game voice path** (for example `voice/player/anna`) to a
+   **Provider voice**, using **Add voice mapping** and **Remove**. Rows
+   missing either value are ignored; a repeated path keeps the last row.
+7. Press **Test Voice** to speak the **Test text** with the current form
+   values. The sample plays on this computer only, saves nothing, and is
+   never heard in the game.
+8. Click **Save Settings**. New calls use the custom voice.
+
+Behavior and limitations:
+
+- Each utterance is synthesized **in full before playback starts**, so long
+  lines add a noticeable delay before the caller begins speaking.
+- On any provider failure the game's built-in voice speaks the line instead —
+  a failed custom voice never silences or drops the line.
+- Filler words ("uh-huh") and other speech without a call context always
+  stay on the built-in voice.
+- Speech recognition is never affected; the TTS provider only ever receives
+  the caller's reply text.
+- Custom voice requires Custom AI v1.1.6, whose installer writes hook
+  manifest **v9** with two additional voice gates in the game. Compatibility
+  probes check the game's voice entries first and refuse the install before
+  modifying any game file when they have changed; an earlier v8 install is
+  upgraded to v9 automatically on the next **Update**/install repair, and
+  re-running **Install Custom AI.cmd** or **Play with Custom AI.cmd** also
+  upgrades it.
 
 ## Update or uninstall
 
@@ -200,13 +266,13 @@ Close the game first and let Steam finish downloads. Keep the
   updates and launch through Steam, or **Uninstall Custom AI.cmd** to remove
   the patch.
 
-**Keep `<game>/CustomAI/settings.json` private. It contains your API key in
-plaintext.** Never share your installed `CustomAI` folder, backups, game logs,
-or modified game DLLs.
+**Keep `<game>/CustomAI/settings.json` private. It contains your AI and TTS
+API keys in plaintext.** Never share your installed `CustomAI` folder,
+backups, game logs, or modified game DLLs.
 
 ## Troubleshooting
 
-Custom AI v1.1.5 targets full release build **26003210** (Steam app **4954910**).
+Custom AI v1.1.6 targets full release build **26003210** (Steam app **4954910**).
 With custom AI enabled,
 prompt preparation uses the game's shipped local rules; turning custom AI off
 preserves the original game route. The hosted service accepts bounded caller
@@ -220,7 +286,7 @@ or protocol changes may still require another update.
   `[CustomAI]` entries in
   `%USERPROFILE%\AppData\LocalLow\Jatater Worldwide\Scam With Your Friends\Player.log`.
 - **Sign in with Steam appears instead of Play** — open F8, enable **Use custom
-  provider**, and click **Save Settings**. With v1.1.5 installed, the game's AI
+  provider**, and click **Save Settings**. With v1.1.6 installed, the game's AI
   service sign-in is optional while custom AI is enabled. The Steam client must
   remain signed in and connected for multiplayer.
 - **"Sorry, what were you saying?"** — the game's fallback response. Open F8
