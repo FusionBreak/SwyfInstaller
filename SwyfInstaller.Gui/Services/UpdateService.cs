@@ -19,7 +19,7 @@ internal sealed record SelfUpdateInfo(
 
 internal sealed class SelfUpdater
 {
-    public const string Owner = "manifest-dex";
+    public const string Owner = "FusionBreak";
     public const string Repo = "SwyfInstaller";
 
     private static readonly HttpClient _api = new() { Timeout = TimeSpan.FromSeconds(20) };

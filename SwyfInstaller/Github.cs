@@ -16,6 +16,71 @@ public sealed class ReleaseInfo
 internal static class Github
 {
     private const string ApiBase = "https://api.github.com/repos/";
+    private const string RawBase = "https://raw.githubusercontent.com/";
+
+    /// <summary>Validates repo/branch/zipPath and returns the normalized "dir/file.zip" path
+    /// inside the branch. Rejects traversal and absolute paths so the raw URL stays inside the repo.</summary>
+    public static string NormalizeBranchSource(string repo, string branch, string zipPath)
+    {
+        repo = (repo ?? "").Trim().Trim('/');
+        branch = (branch ?? "").Trim().Trim('/');
+        zipPath = (zipPath ?? "").Trim().Trim('/');
+        if (!repo.Contains('/') || branch == "")
+            throw new InvalidDataException("Branch source needs Repo (owner/name) and Branch to be set.");
+        if (zipPath == "" || !zipPath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("BranchZipPath must point to a .zip file inside the branch.");
+        if (zipPath.Split('/', StringSplitOptions.RemoveEmptyEntries).Any(s => s == ".."))
+            throw new InvalidDataException("BranchZipPath must stay inside the repository.");
+        return string.Join('/', zipPath.Split('/', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    public static string BranchRawUrl(string repo, string branch, string relZip) =>
+        RawBase + repo.Trim('/') + "/" + Uri.EscapeDataString(branch.Trim('/')) + "/" +
+        string.Join('/', relZip.Split('/').Select(Uri.EscapeDataString));
+
+    /// <summary>Branch mode: the package ZIP lives in the branch itself, committed together with a
+    /// ".sha256" checksum file (release.ps1 -Commit creates both). Integrity stays mandatory:
+    /// without the checksum file the install is refused. The commit SHA (when the API answers)
+    /// becomes part of the tag so re-checks on an unchanged branch report "up to date".</summary>
+    public static async Task<ReleaseInfo> GetBranchAsync(HttpClient http, string repo, string branch, string zipPath, CancellationToken ct)
+    {
+        string relZip = NormalizeBranchSource(repo, branch, zipPath);
+        string zipUrl = BranchRawUrl(repo, branch, relZip);
+
+        using (var probe = await http.GetAsync(zipUrl + ".sha256", ct))
+        {
+            if ((int)probe.StatusCode == 404)
+                throw new InvalidDataException(
+                    "Branch \"" + branch + "\" of " + repo.Trim('/') + " has no " + relZip + ".sha256. " +
+                    "Branch installs require the package ZIP and its .sha256 to be committed to the branch " +
+                    "(build the package with release.ps1 and commit both files). " +
+                    "Clear \"Branch\" in config.json to install from Releases instead.");
+            if (!probe.IsSuccessStatusCode)
+                throw new HttpRequestException("raw.githubusercontent.com returned HTTP " + (int)probe.StatusCode + " for " + relZip + ".sha256.");
+        }
+
+        string sha = await TryGetCommitShaAsync(http, repo, branch, ct);
+        return new ReleaseInfo
+        {
+            Tag = "branch:" + branch.Trim('/') + (sha == "" ? "" : "@" + sha.Substring(0, Math.Min(12, sha.Length))),
+            ZipName = Path.GetFileName(relZip),
+            ZipUrl = zipUrl,
+            ChecksumName = Path.GetFileName(relZip) + ".sha256",
+            ChecksumUrl = zipUrl + ".sha256",
+        };
+    }
+
+    private static async Task<string> TryGetCommitShaAsync(HttpClient http, string repo, string branch, CancellationToken ct)
+    {
+        try
+        {
+            using var res = await http.GetAsync(ApiBase + repo.Trim('/') + "/commits/" + Uri.EscapeDataString(branch.Trim('/')), ct);
+            if (!res.IsSuccessStatusCode) return "";
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
+            return doc.RootElement.TryGetProperty("sha", out var el) ? el.GetString() ?? "" : "";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return ""; }
+    }
 
     private static ReleaseInfo TryParseRelease(JsonElement root)
     {

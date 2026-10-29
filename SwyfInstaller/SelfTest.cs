@@ -97,6 +97,37 @@ internal static class SelfTest
             try { Github.ParseLatest("o/r", "{}"); } catch { threw = true; }
             Check(threw, "release parse rejects empty payload");
 
+            Check(Github.NormalizeBranchSource("o/r", " dev ", " /x/y.zip ") == "x/y.zip", "branch source normalizes");
+            Check(Github.BranchRawUrl("o/r", "dev", "x/y.zip") == "https://raw.githubusercontent.com/o/r/dev/x/y.zip", "branch raw URL");
+            threw = false;
+            try { Github.NormalizeBranchSource("o/r", "dev", "../evil.zip"); } catch { threw = true; }
+            Check(threw, "branch source rejects traversal");
+            threw = false;
+            try { Github.NormalizeBranchSource("o/r", "dev", "notes.txt"); } catch { threw = true; }
+            Check(threw, "branch source requires a .zip");
+
+            var bundleRoot = Path.Combine(root, "bundle");
+            Directory.CreateDirectory(Path.Combine(bundleRoot, "bin", "Debug"));
+            string bundleZip = Path.Combine(bundleRoot, "SWYF-Custom-AI-win-x64.zip");
+            File.WriteAllText(bundleZip, "bundled package bytes");
+            Check(Ops.FindBundledZip(new Store.AppConfig(), Path.Combine(bundleRoot, "bin", "Debug")) == bundleZip,
+                "bundled package discovered in a parent folder");
+            var packaged = Path.Combine(root, "app");
+            Directory.CreateDirectory(Path.Combine(packaged, "package"));
+            File.WriteAllText(Path.Combine(packaged, "package", "SWYF-Custom-AI-win-x64.zip"), "x");
+            Check(Ops.FindBundledZip(new Store.AppConfig(), packaged).EndsWith(Path.Combine("package", "SWYF-Custom-AI-win-x64.zip")),
+                "bundled package discovered in package folder");
+            var bundled = Ops.BundledRelease(bundleZip);
+            Check(bundled.Tag.StartsWith("bundle@") && bundled.ZipUrl == "" && bundled.ZipName == "SWYF-Custom-AI-win-x64.zip", "bundled release tag from digest");
+            File.WriteAllText(bundleZip + ".sha256", new string('0', 64) + "  SWYF-Custom-AI-win-x64.zip");
+            threw = false;
+            try { Ops.BundledRelease(bundleZip); } catch { threw = true; }
+            Check(threw, "bundled package checksum mismatch is refused");
+            File.Delete(bundleZip + ".sha256");
+            threw = false;
+            try { Ops.FindBundledZip(new Store.AppConfig { BundleZipPath = Path.Combine(root, "missing.zip") }, root); } catch { threw = true; }
+            Check(threw, "missing explicit BundleZipPath is reported");
+
             threw = false;
             try { Store.ParseChecksumFile("not a hash\n"); } catch { threw = true; }
             Check(threw, "checksum parse rejects garbage");

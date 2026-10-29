@@ -6,6 +6,7 @@ artifacts/
 dist/
 TestResults/
 *.zip
+!SWYF-Custom-AI-win-x64.zip
 
 # Custom AI mod (custom-ai/) - game-local and secret files, never commit
 settings.json

@@ -33,10 +33,74 @@ public static class Ops
             Say(log, "WARNING: the game appears to be running. Close it (and the F8 panel) before continuing.");
     }
 
-    public static async Task<ReleaseInfo> FetchLatestAsync(string repo, CancellationToken ct)
+    /// <summary>Update source: branch mode when cfg.Branch is set (raw ZIP + committed .sha256),
+    /// otherwise GitHub Releases of cfg.Repo.</summary>
+    public static async Task<ReleaseInfo> FetchSourceAsync(Store.AppConfig cfg, CancellationToken ct)
     {
         using var http = Github.CreateClient(TimeSpan.FromSeconds(30));
-        return await Github.GetLatestAsync(http, repo, ct);
+        return string.IsNullOrWhiteSpace(cfg.Branch)
+            ? await Github.GetLatestAsync(http, cfg.Repo, ct)
+            : await Github.GetBranchAsync(http, cfg.Repo, cfg.Branch, cfg.BranchZipPath, ct);
+    }
+
+    public static string SourceLabel(Store.AppConfig cfg) =>
+        string.IsNullOrWhiteSpace(cfg.Branch) ? cfg.Repo + " (Releases)" : cfg.Repo + " (branch " + cfg.Branch.Trim() + ")";
+
+    /// <summary>Finds a package ZIP shipped with the app or the cloned repo: the explicit
+    /// cfg.BundleZipPath, then SWYF-Custom-AI-win-x64.zip in the app folder, in package\ next to
+    /// it, or in any of the 6 parent folders (covers bin/Debug output and the repo root).</summary>
+    public static string FindBundledZip(Store.AppConfig cfg, string startDir = null)
+    {
+        if (!string.IsNullOrWhiteSpace(cfg.BundleZipPath))
+        {
+            if (File.Exists(cfg.BundleZipPath)) return Path.GetFullPath(cfg.BundleZipPath);
+            throw new InvalidDataException("BundleZipPath is set but the file does not exist: " + cfg.BundleZipPath);
+        }
+        const string name = "SWYF-Custom-AI-win-x64.zip";
+        var dir = new DirectoryInfo(startDir ?? AppContext.BaseDirectory);
+        for (int i = 0; i <= 6 && dir != null; i++, dir = dir.Parent)
+        {
+            string direct = Path.Combine(dir.FullName, name);
+            if (File.Exists(direct)) return Path.GetFullPath(direct);
+            string packaged = Path.Combine(dir.FullName, "package", name);
+            if (File.Exists(packaged)) return Path.GetFullPath(packaged);
+        }
+        return "";
+    }
+
+    /// <summary>Release description for a local package ZIP; verified against its .sha256 sibling
+    /// when one exists. The tag carries the digest so unchanged packages report "up to date".</summary>
+    public static ReleaseInfo BundledRelease(string zipPath)
+    {
+        string sha = Store.Sha256File(zipPath);
+        string shaPath = zipPath + ".sha256";
+        if (File.Exists(shaPath))
+        {
+            string want = Store.ParseChecksumFile(File.ReadAllText(shaPath));
+            if (want != sha)
+                throw new InvalidDataException("Bundled package does not match its .sha256 (" + zipPath + "). " +
+                    "The checkout is inconsistent - run \"git pull\" (or re-download) and retry.");
+        }
+        return new ReleaseInfo { Tag = "bundle@" + sha.Substring(0, Math.Min(12, sha.Length)), ZipName = Path.GetFileName(zipPath), ZipUrl = "" };
+    }
+
+    /// <summary>Source resolution order: explicit "Branch" (raw files on GitHub), then a bundled
+    /// package ZIP (offline: next to the app, in package\, or in the cloned repo), then Releases.</summary>
+    public static async Task<(ReleaseInfo Rel, string LocalZip)> ResolveSourceAsync(Store.AppConfig cfg, IProgress<string> log, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(cfg.Branch))
+        {
+            Say(log, "Checking latest package from " + SourceLabel(cfg) + " ...");
+            return (await FetchSourceAsync(cfg, ct), "");
+        }
+        string bundle = FindBundledZip(cfg);
+        if (bundle != "")
+        {
+            Say(log, "Using bundled package (offline): " + bundle);
+            return (BundledRelease(bundle), bundle);
+        }
+        Say(log, "Checking latest release of " + SourceLabel(cfg) + " ...");
+        return (await FetchSourceAsync(cfg, ct), "");
     }
 
     public static async Task<string> DownloadAndVerifyAsync(ReleaseInfo rel, string workDir, IProgress<string> log, IProgress<double> progress, CancellationToken ct)
@@ -188,10 +252,9 @@ public static class Ops
     public static async Task<int> InstallFlowAsync(Store.AppConfig cfg, string workDir, bool autoYes, bool applyPatch, bool visibleWindow, IProgress<string> log = null, IProgress<double> progress = null, CancellationToken ct = default)
     {
         WarnIfGameRunning(log);
-        Say(log, "Checking latest release of " + cfg.Repo + " ...");
-        ReleaseInfo rel = await FetchLatestAsync(cfg.Repo, ct);
-        Say(log, "Latest: " + rel.Tag + " (" + rel.ZipName + ")");
-        string zip = await DownloadAndVerifyAsync(rel, workDir, log, progress, ct);
+        var (rel, localZip) = await ResolveSourceAsync(cfg, log, ct);
+        Say(log, "Package: " + rel.Tag + " (" + rel.ZipName + ")");
+        string zip = localZip != "" ? localZip : await DownloadAndVerifyAsync(rel, workDir, log, progress, ct);
         Say(log, "Extracting into game folder ...");
         var files = ExtractZip(zip, cfg.GameDir);
         RecordManifest(cfg.Repo, rel.Tag, cfg.GameDir, files);
@@ -210,16 +273,15 @@ public static class Ops
     public static async Task<int> UpdateFlowAsync(Store.AppConfig cfg, string workDir, bool autoYes, bool applyPatch, bool force, bool visibleWindow, IProgress<string> log = null, IProgress<double> progress = null, CancellationToken ct = default)
     {
         WarnIfGameRunning(log);
-        Say(log, "Checking latest release of " + cfg.Repo + " ...");
-        ReleaseInfo rel = await FetchLatestAsync(cfg.Repo, ct);
-        Say(log, "Latest: " + rel.Tag + ". Installed: " + (cfg.InstalledTag == "" ? "(unknown)" : cfg.InstalledTag));
+        var (rel, localZip) = await ResolveSourceAsync(cfg, log, ct);
+        Say(log, "Package: " + rel.Tag + ". Installed: " + (cfg.InstalledTag == "" ? "(unknown)" : cfg.InstalledTag));
         if (!force && cfg.InstalledTag != "" && string.Equals(cfg.InstalledTag, rel.Tag, StringComparison.OrdinalIgnoreCase))
         {
             Say(log, "Already up to date.");
             return 0;
         }
         if (!Confirm("Update to " + rel.Tag + "? Old package files are removed first (settings and backups are kept).", autoYes)) return 0;
-        string zip = await DownloadAndVerifyAsync(rel, workDir, log, progress, ct);
+        string zip = localZip != "" ? localZip : await DownloadAndVerifyAsync(rel, workDir, log, progress, ct);
         Say(log, "Removing old package files (settings and backups are kept) ...");
         RemovePackageFiles(cfg.GameDir, log);
         Say(log, "Extracting " + rel.Tag + " ...");

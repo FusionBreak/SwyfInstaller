@@ -29,7 +29,7 @@ and always runs on this computer.
 ## Get started in 3 steps (recommended)
 
 1. **Install this app** — download `SwyfInstaller-Setup-v*-win-x64.exe` from
-   [Releases](https://github.com/manifest-dex/SwyfInstaller/releases) and run it
+   [Releases](https://github.com/FusionBreak/SwyfInstaller/releases) and run it
    (per-user, no admin needed).
 2. **Find your game** — the app detects your Steam libraries on startup and
    fills in the game folder itself. If it can't, press **Detect** or **Browse**
@@ -51,9 +51,37 @@ release. Press **Install** to apply the mod there, then check your settings with
 
 | Button | What happens | Your data |
 |---|---|---|
-| Install | Downloads the latest verified mod and applies it | Kept |
-| Update | Removes old mod files, installs the latest | Settings, sign-in, backups kept |
+| Install | Installs the package (bundled ZIP or latest verified download) and applies the patch | Kept |
+| Update | Removes old mod files, installs the latest package | Settings, sign-in, backups kept |
 | Uninstall | Removes the mod, restores original game files | Settings and backups kept |
+
+## Where the package comes from
+
+The installer resolves the mod package in this order — every source is
+SHA-256 verified before any game file is touched:
+
+1. **Bundled package** — `SWYF-Custom-AI-win-x64.zip` next to the app, in
+   `package\`, or in a cloned repository's root (override with
+   `"BundleZipPath"`). No internet needed; after a `git pull` press
+   **Update** to apply the new package.
+2. **Branch** — set `"Branch": "custom-tts"` in
+   `%APPDATA%\SwyfInstaller\config.json` to fetch the ZIP and its `.sha256`
+   straight from that GitHub branch (raw.githubusercontent.com).
+3. **Releases** — otherwise the latest release of `"Repo"` in the same
+   config file (default: `FusionBreak/SwyfInstaller`).
+
+## Build and install from the repo (no Setup, no download)
+
+```powershell
+git clone https://github.com/FusionBreak/SwyfInstaller.git
+cd SwyfInstaller
+dotnet build SwyfInstaller.Gui -c Release
+.\SwyfInstaller.Gui\bin\Release\net10.0-windows\SwyfInstallerGui.exe
+```
+
+The app detects your game folder; press **Install** — it finds the mod package
+committed in the repository and installs it offline. To produce a Setup.exe,
+run Inno Setup on `installer.iss`; the package ZIP is embedded automatically.
 
 Downloads are SHA-256 verified before anything touches your game — a mismatch
 aborts. The app checks for its own updates silently on startup. The patch step

@@ -2,8 +2,8 @@
 #define AppVersion "0.0.0"
 #endif
 #define AppName "SWYF Custom AI Installer"
-#define AppPublisher "manifest-dex"
-#define AppURL "https://github.com/manifest-dex/SwyfInstaller"
+#define AppPublisher "FusionBreak"
+#define AppURL "https://github.com/FusionBreak/SwyfInstaller"
 #define AppId "{{5894F6DF-98F3-4483-BB09-D21B72055681}"
 
 [Setup]
@@ -34,6 +34,9 @@ Source: "SwyfInstaller.Gui\publish\*"; DestDir: "{app}"; Flags: ignoreversion re
 Source: "SwyfInstaller\publish\SwyfInstaller.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+; Bundled mod package: the app installs from {app}\package offline (see README). Skip if the checkout has no zip.
+Source: "SWYF-Custom-AI-win-x64.zip"; DestDir: "{app}\package"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "SWYF-Custom-AI-win-x64.zip.sha256"; DestDir: "{app}\package"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\SWYF Custom AI Installer"; Filename: "{app}\SwyfInstallerGui.exe"
