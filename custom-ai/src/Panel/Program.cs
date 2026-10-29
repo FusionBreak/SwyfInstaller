@@ -15,9 +15,33 @@ namespace Swyf.CustomAI;
 
 public sealed record Startup(string InternalToken, string BrowserToken, string ConfigPath, int ParentId);
 public sealed record Settings(bool Enabled = false, string BaseUrl = "", string Model = "", string ApiKey = "",
-    double? Temperature = null, double? TopP = null, int? MaxTokens = null, string OutputMode = "schema", bool UseManifestDeX = false);
+    double? Temperature = null, double? TopP = null, int? MaxTokens = null, string OutputMode = "schema", bool UseManifestDeX = false,
+    bool TtsEnabled = false, string TtsBaseUrl = "", string TtsModel = "", string TtsVoice = "", string TtsApiKey = "",
+    double? TtsSpeed = null, Dictionary<string, string>? TtsVoiceMap = null)
+{
+    // Voice maps compare by content so record equality (which drives provider connection state) survives save, load, and PUT round trips.
+    public bool Equals(Settings? other) => other is not null && Enabled == other.Enabled && BaseUrl == other.BaseUrl &&
+        Model == other.Model && ApiKey == other.ApiKey && Temperature == other.Temperature && TopP == other.TopP &&
+        MaxTokens == other.MaxTokens && OutputMode == other.OutputMode && UseManifestDeX == other.UseManifestDeX &&
+        TtsEnabled == other.TtsEnabled && TtsBaseUrl == other.TtsBaseUrl && TtsModel == other.TtsModel &&
+        TtsVoice == other.TtsVoice && TtsApiKey == other.TtsApiKey && TtsSpeed == other.TtsSpeed &&
+        VoiceMapsEqual(TtsVoiceMap, other.TtsVoiceMap);
+    public override int GetHashCode() => HashCode.Combine(
+        HashCode.Combine(Enabled, BaseUrl, Model, ApiKey, Temperature, TopP, MaxTokens, OutputMode),
+        HashCode.Combine(UseManifestDeX, TtsEnabled, TtsBaseUrl, TtsModel, TtsVoice, TtsApiKey, TtsSpeed),
+        VoiceMapHash(TtsVoiceMap));
+    private static bool VoiceMapsEqual(Dictionary<string, string>? a, Dictionary<string, string>? b)
+    {
+        var left = a ?? EmptyVoiceMap; var right = b ?? EmptyVoiceMap;
+        return left.Count == right.Count && left.All(e => right.TryGetValue(e.Key, out var voice) && voice == e.Value);
+    }
+    private static int VoiceMapHash(Dictionary<string, string>? map) { var hash = 0; foreach (var e in map ?? EmptyVoiceMap) hash ^= HashCode.Combine(e.Key, e.Value); return hash; }
+    private static readonly Dictionary<string, string> EmptyVoiceMap = new();
+}
 public sealed record SettingsInput(bool Enabled, string BaseUrl, string Model, string? ApiKey = null,
-    bool ClearApiKey = false, double? Temperature = null, double? TopP = null, int? MaxTokens = null, string OutputMode = "schema", bool UseManifestDeX = false);
+    bool ClearApiKey = false, double? Temperature = null, double? TopP = null, int? MaxTokens = null, string OutputMode = "schema", bool UseManifestDeX = false,
+    bool TtsEnabled = false, string TtsBaseUrl = "", string TtsModel = "", string TtsVoice = "", string? TtsApiKey = null,
+    bool ClearTtsApiKey = false, double? TtsSpeed = null, Dictionary<string, string>? TtsVoiceMap = null);
 public sealed class ApiFailure(int status, string code, string message, int? retryAfter = null) : Exception(message)
 {
     public int Status { get; } = status;
@@ -52,11 +76,16 @@ public sealed class SettingsStore(string path)
     public Settings Merge(SettingsInput input)
     {
         var old = Read();
-        var settings = input.UseManifestDeX
+        // Hosted mode blocks untrusted LLM edits only; the whole TTS document applies in both modes and Validate runs before the hosted early-return rejects bad TTS.
+        var settings = (input.UseManifestDeX
             ? old with { Enabled = input.Enabled, UseManifestDeX = true }
             : new Settings(input.Enabled, (input.BaseUrl ?? "").Trim().TrimEnd('/'),
                 (input.Model ?? "").Trim(), input.ClearApiKey ? "" : input.ApiKey ?? old.ApiKey,
-                input.Temperature, input.TopP, input.MaxTokens, input.OutputMode);
+                input.Temperature, input.TopP, input.MaxTokens, input.OutputMode))
+            with { TtsEnabled = input.TtsEnabled, TtsBaseUrl = (input.TtsBaseUrl ?? "").Trim().TrimEnd('/'),
+                TtsModel = (input.TtsModel ?? "").Trim(), TtsVoice = (input.TtsVoice ?? "").Trim(),
+                TtsApiKey = input.ClearTtsApiKey ? "" : input.TtsApiKey ?? old.TtsApiKey,
+                TtsSpeed = input.TtsSpeed, TtsVoiceMap = input.TtsVoiceMap ?? new() };
         Validate(settings, settings.Enabled);
         return settings;
     }
@@ -74,8 +103,32 @@ public sealed class SettingsStore(string path)
         }
     }
 
+    public const int MaxTtsVoiceMapEntries = 128;
+
     public static void Validate(Settings s, bool requireConnection)
     {
+        if (s.TtsEnabled || !string.IsNullOrEmpty(s.TtsBaseUrl))
+        {
+            if (!Uri.TryCreate(s.TtsBaseUrl, UriKind.Absolute, out var ttsUri) ||
+                ttsUri.Scheme is not ("http" or "https") || ttsUri.UserInfo != "" || ttsUri.Query != "" || ttsUri.Fragment != "")
+                throw new ApiFailure(400, "config", "The TTS base URL must be an HTTP(S) address without credentials, a query string, or a fragment.");
+        }
+        if (s.TtsEnabled && string.IsNullOrWhiteSpace(s.TtsModel))
+            throw new ApiFailure(400, "config", "A TTS model ID is required.");
+        if (s.TtsEnabled && string.IsNullOrWhiteSpace(s.TtsVoice))
+            throw new ApiFailure(400, "config", "A default TTS voice is required for game voices without a mapping.");
+        if (s.TtsApiKey.Contains('\r') || s.TtsApiKey.Contains('\n'))
+            throw new ApiFailure(400, "config", "The TTS API key cannot contain line breaks.");
+        if (s.TtsSpeed is < 0.25 or > 4 || s.TtsSpeed is double ttsSpeed && !double.IsFinite(ttsSpeed))
+            throw new ApiFailure(400, "config", "The TTS speed must be blank or between 0.25 and 4.");
+        if (s.TtsVoiceMap is { } voiceMap)
+        {
+            if (voiceMap.Count > MaxTtsVoiceMapEntries)
+                throw new ApiFailure(400, "config", $"The TTS voice map can contain at most {MaxTtsVoiceMapEntries} game voices.");
+            if (voiceMap.Any(e => string.IsNullOrWhiteSpace(e.Key) || string.IsNullOrWhiteSpace(e.Value) ||
+                e.Key.Any(char.IsControl) || e.Value.Any(char.IsControl)))
+                throw new ApiFailure(400, "config", "TTS voice map entries need a game voice path and a provider voice without control characters.");
+        }
         if (s.UseManifestDeX) return; // Fixed HTTPS endpoint and scoped ticket are owned by ManifestDeXClient.
         if (requireConnection || !string.IsNullOrEmpty(s.BaseUrl))
         {
@@ -95,7 +148,9 @@ public sealed class SettingsStore(string path)
     }
 
     public object Public() { var s = Read(); return new { s.Enabled, s.BaseUrl, s.Model, hasApiKey = s.ApiKey.Length > 0,
-        s.Temperature, s.TopP, s.MaxTokens, s.OutputMode, s.UseManifestDeX, loadError = LoadError }; }
+        s.Temperature, s.TopP, s.MaxTokens, s.OutputMode, s.UseManifestDeX,
+        s.TtsEnabled, s.TtsBaseUrl, s.TtsModel, s.TtsVoice, hasTtsApiKey = s.TtsApiKey.Length > 0,
+        s.TtsSpeed, ttsVoiceMap = s.TtsVoiceMap ?? new Dictionary<string, string>(), loadError = LoadError }; }
 }
 
 public sealed class Provider : IDisposable
@@ -108,10 +163,13 @@ public sealed class Provider : IDisposable
     private readonly ConcurrentDictionary<(string Endpoint, string Model, string Parameter), byte> unsupportedDefaults = new();
     public string? LastError { get; private set; }
     public long Completed;
-    private readonly ConcurrentDictionary<Settings, (string State, string? Error)> connectionStates = new();
+    private readonly ConcurrentDictionary<(bool, string, string, string, double?, double?, int?, string, bool), (string State, string? Error)> connectionStates = new();
+    // Connection state covers only the caller settings; saving unrelated TTS fields must not discard a verified connection.
+    private static (bool, string, string, string, double?, double?, int?, string, bool) StateKey(Settings s)
+        => (s.Enabled, s.BaseUrl, s.Model, s.ApiKey, s.Temperature, s.TopP, s.MaxTokens, s.OutputMode, s.UseManifestDeX);
     public object ConnectionStatus(Settings settings, string? loadError)
     {
-        var status = connectionStates.TryGetValue(settings, out var value) ? value : (State: "untested", Error: (string?)null);
+        var status = connectionStates.TryGetValue(StateKey(settings), out var value) ? value : (State: "untested", Error: (string?)null);
         return new { enabled = settings.Enabled, model = settings.Model,
             state = loadError != null ? "error" : !settings.Enabled ? "disabled" : status.State,
             message = loadError ?? status.Error };
@@ -172,7 +230,7 @@ public sealed class Provider : IDisposable
         deadline.CancelAfter(TimeSpan.FromSeconds(15));
         var token = deadline.Token;
         bool hasAll = false, hasBackground = false;
-        connectionStates[settings] = ("connecting", null);
+        connectionStates[StateKey(settings)] = ("connecting", null);
         try
         {
             if (isBackground) { await background.WaitAsync(token); hasBackground = true; }
@@ -229,19 +287,19 @@ public sealed class Provider : IDisposable
             ExtractText(json);
             LastError = null;
             Interlocked.Increment(ref Completed);
-            connectionStates[settings] = ("success", null);
+            connectionStates[StateKey(settings)] = ("success", null);
             return json;
             }
         }
         catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
-        { LastError = "The provider did not respond within 15 seconds."; connectionStates[settings] = ("error", LastError); throw new ApiFailure(504, "timeout", LastError); }
+        { LastError = "The provider did not respond within 15 seconds."; connectionStates[StateKey(settings)] = ("error", LastError); throw new ApiFailure(504, "timeout", LastError); }
         catch (OperationCanceledException)
-        { connectionStates[settings] = ("error", "The request was canceled or the game response deadline expired."); throw; }
+        { connectionStates[StateKey(settings)] = ("error", "The request was canceled or the game response deadline expired."); throw; }
         catch (HttpRequestException)
-        { LastError = "Could not connect to the provider. Check the address, TLS, and network connection."; connectionStates[settings] = ("error", LastError); throw new ApiFailure(502, "connection", LastError); }
+        { LastError = "Could not connect to the provider. Check the address, TLS, and network connection."; connectionStates[StateKey(settings)] = ("error", LastError); throw new ApiFailure(502, "connection", LastError); }
         catch (Exception e) when (e is JsonException or InvalidOperationException or ArgumentException)
-        { LastError = "The provider did not return a valid Chat Completions response."; connectionStates[settings] = ("error", LastError); throw new ApiFailure(502, "invalid_response", LastError); }
-        catch (ApiFailure e) { LastError = e.Message; connectionStates[settings] = ("error", LastError); throw; }
+        { LastError = "The provider did not return a valid Chat Completions response."; connectionStates[StateKey(settings)] = ("error", LastError); throw new ApiFailure(502, "invalid_response", LastError); }
+        catch (ApiFailure e) { LastError = e.Message; connectionStates[StateKey(settings)] = ("error", LastError); throw; }
         finally { if (hasAll) all.Release(); if (hasBackground) background.Release(); }
     }
 

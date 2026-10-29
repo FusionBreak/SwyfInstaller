@@ -135,6 +135,64 @@ using (var hostedClient = new ManifestDeXClient(config, provider))
 }
 File.WriteAllText(config, "bad-json"); reloaded.Load(); Check(reloaded.Read().Enabled && reloaded.LoadError != null, "corrupt config fails closed");
 
+// Custom TTS provider settings: schema, validation, persistence (mirrors the LLM provider conventions above).
+static bool TtsRejected(Settings s) { try { SettingsStore.Validate(s, s.Enabled); return false; } catch (ApiFailure e) { return e.Code == "config"; } }
+var ttsConfig = Path.Combine(output, "tts-settings.json");
+var ttsStore = new SettingsStore(ttsConfig); ttsStore.Load();
+Check(!ttsStore.Read().TtsEnabled && ttsStore.Read().TtsBaseUrl == "" && ttsStore.Read().TtsModel == "" && ttsStore.Read().TtsVoice == "" &&
+    ttsStore.Read().TtsApiKey == "" && ttsStore.Read().TtsSpeed == null && ttsStore.Read().TtsVoiceMap is null or { Count: 0 }, "first launch keeps custom TTS off");
+Check(new Settings() == new Settings() && new Settings(TtsVoiceMap: new() { ["voice/player"] = "alloy" }) == new Settings(TtsVoiceMap: new() { ["voice/player"] = "alloy" }), "voice maps compare by content in settings equality");
+var savedTts = new Settings(true, url + "/v1", "fake-model", "saved-secret", TtsEnabled: true, TtsBaseUrl: url + "/tts", TtsModel: "voice-model", TtsVoice: "default-voice", TtsApiKey: "tts-secret", TtsSpeed: 1.25, TtsVoiceMap: new() { ["voice/player/anna"] = "alloy", ["voice/npc/guard"] = "onyx" });
+ttsStore.Save(savedTts);
+var ttsReload = new SettingsStore(ttsConfig); ttsReload.Load();
+Check(ttsReload.Read() == savedTts && ttsReload.Read().TtsVoiceMap!["voice/npc/guard"] == "onyx" && ttsReload.Read().TtsSpeed == 1.25, "custom TTS settings persist and reload unchanged");
+File.WriteAllText(ttsConfig, """{"enabled":true,"baseUrl":"http://127.0.0.1:8080/v1","model":"legacy","apiKey":"legacy-key","temperature":0.5,"outputMode":"json"}""");
+ttsReload.Load();
+Check(ttsReload.Read().ApiKey == "legacy-key" && ttsReload.Read().Temperature == 0.5 && ttsReload.Read().OutputMode == "json" && !ttsReload.Read().TtsEnabled &&
+    ttsReload.Read().TtsBaseUrl == "" && ttsReload.Read().TtsApiKey == "" && ttsReload.Read().TtsVoiceMap is null or { Count: 0 } && ttsReload.LoadError == null, "legacy settings without TTS fields load unchanged with TTS off");
+File.WriteAllText(ttsConfig, """{"enabled":true,"baseUrl":"http://127.0.0.1:8080/v1","model":"legacy","apiKey":"legacy-key","ttsEnabled":true,"ttsBaseUrl":"http://127.0.0.1:8080/tts","ttsModel":"voice-model","ttsVoice":"default-voice","ttsApiKey":"tts-secret","ttsSpeed":1.25,"ttsVoiceMap":{"voice/player":"alloy"}}""");
+ttsReload.Load();
+var ttsPublic = JsonSerializer.SerializeToNode(ttsReload.Public(), SettingsStore.Json)!;
+
+Check(ttsPublic["hasTtsApiKey"]!.GetValue<bool>() && ttsPublic["ttsApiKey"] is null && !ttsPublic.ToJsonString().Contains("tts-secret") &&
+    ttsPublic["ttsVoiceMap"]!["voice/player"]!.GetValue<string>() == "alloy", "config GET exposes hasTtsApiKey and never the TTS key");
+Check(ttsReload.Merge(new(false, "http://127.0.0.1:8080/v1", "legacy")).TtsApiKey == "tts-secret", "blank TTS key preserves the saved secret");
+Check(ttsReload.Merge(new(false, "http://127.0.0.1:8080/v1", "legacy", ClearTtsApiKey: true)).TtsApiKey == "", "explicit clear removes the TTS key");
+Check(ttsReload.Merge(new(false, "http://127.0.0.1:8080/v1", "legacy", TtsApiKey: "replacement")).TtsApiKey == "replacement", "submitted TTS key replaces the saved one");
+var hostedTts = ttsReload.Merge(new(true, "https://untrusted.invalid", "ignored", UseManifestDeX: true, TtsEnabled: true, TtsBaseUrl: "https://tts.example/v2/", TtsModel: "voice-model-2", TtsVoice: "default-voice", TtsSpeed: 1.75, TtsVoiceMap: new() { ["voice/player"] = "nova" }));
+Check(hostedTts.UseManifestDeX && hostedTts.BaseUrl == "http://127.0.0.1:8080/v1" && hostedTts.ApiKey == "legacy-key" && hostedTts.TtsEnabled &&
+    hostedTts.TtsBaseUrl == "https://tts.example/v2" && hostedTts.TtsModel == "voice-model-2" && hostedTts.TtsApiKey == "tts-secret" &&
+    hostedTts.TtsSpeed == 1.75 && hostedTts.TtsVoiceMap!["voice/player"] == "nova", "hosted selection applies valid TTS edits and still ignores blocked LLM edits");
+ttsReload.Save(hostedTts);
+var hostedTtsReload = new SettingsStore(ttsConfig); hostedTtsReload.Load();
+Check(hostedTtsReload.LoadError == null && hostedTtsReload.Read() == hostedTts, "hosted TTS edit persists and reloads unchanged");
+try { ttsReload.Merge(new(true, "https://untrusted.invalid", "ignored", UseManifestDeX: true, TtsEnabled: true, TtsBaseUrl: "ftp://tts.example/v1", TtsModel: "voice-model-2", TtsVoice: "default-voice")); throw new Exception("hosted save accepted an invalid TTS base URL"); }
+catch (ApiFailure e) { Check(e.Code == "config", "hosted save rejects invalid TTS with a config failure instead of silently dropping it"); }
+Check(new[] { "tts.example/v1", "http://user:pw@tts.example/v1", "https://tts.example/v1?voice=x", "https://tts.example/v1#x", "" }
+    .All(bad => TtsRejected(new(TtsEnabled: true, TtsBaseUrl: bad, TtsModel: "m", TtsVoice: "v")))
+    && !TtsRejected(new(TtsEnabled: true, TtsBaseUrl: "https://tts.example/v1", TtsModel: "m", TtsVoice: "v"))
+    && !TtsRejected(new(TtsBaseUrl: "https://tts.example/v1", TtsModel: "m", TtsVoice: "v")), "TTS base URL must be absolute HTTP(S) without credentials, query, or fragment");
+Check(TtsRejected(new(TtsEnabled: true, TtsBaseUrl: "https://tts.example/v1")) && TtsRejected(new(TtsEnabled: true, TtsBaseUrl: "https://tts.example/v1", TtsModel: "m")), "enabled TTS requires model and default voice");
+SettingsStore.Validate(new(TtsEnabled: false, TtsModel: "leftover-model", TtsVoice: "leftover-voice", TtsApiKey: "leftover key", TtsVoiceMap: new() { ["voice/old"] = "kept" }), false);
+Check(true, "disabled TTS keeps leftover values without validation errors");
+Check(TtsRejected(new(TtsApiKey: "bad\rkey")) && TtsRejected(new(TtsApiKey: "bad\nkey")), "TTS API key rejects line breaks");
+Check(TtsRejected(new(TtsSpeed: 0.1)) && TtsRejected(new(TtsSpeed: 4.5)) && TtsRejected(new(TtsSpeed: double.NaN)) &&
+    !TtsRejected(new(TtsSpeed: 0.25)) && !TtsRejected(new(TtsSpeed: 4)) && !TtsRejected(new(TtsSpeed: null)), "TTS speed must be blank or between 0.25 and 4");
+Check(TtsRejected(new(TtsVoiceMap: new() { [""] = "alloy" })) && TtsRejected(new(TtsVoiceMap: new() { ["voice/player"] = "" })) &&
+    TtsRejected(new(TtsVoiceMap: new() { ["voice\u0001player"] = "alloy" })) && TtsRejected(new(TtsVoiceMap: new() { ["voice/player"] = "all\u0000oy" })), "TTS voice map rejects empty or control-character entries");
+bool NullProviderVoiceRejected()
+{
+    try { var parsed = JsonSerializer.Deserialize<Settings>("""{"ttsVoiceMap":{"voice/player":null}}""", SettingsStore.Json); return parsed is null || TtsRejected(parsed); }
+    catch (JsonException) { return true; }
+}
+Check(NullProviderVoiceRejected(), "TTS voice map rejects a null provider voice");
+var manyVoices = new Dictionary<string, string>(); for (var i = 0; i <= SettingsStore.MaxTtsVoiceMapEntries; i++) manyVoices["voice/" + i] = "voice-" + i;
+Check(!TtsRejected(new(TtsVoiceMap: manyVoices.Take(SettingsStore.MaxTtsVoiceMapEntries).ToDictionary(p => p.Key, p => p.Value))) && TtsRejected(new(TtsVoiceMap: manyVoices)), "TTS voice map is capped at 128 entries");
+try { SettingsStore.Validate(new(TtsVoiceMap: manyVoices), false); throw new Exception("Oversized TTS voice map accepted"); }
+catch (ApiFailure e) { Check(e.Code == "config" && e.Message.Contains("128"), "oversized TTS voice map reports a clear error"); }
+File.WriteAllText(ttsConfig, "broken-tts-json"); ttsReload.Load();
+Check(ttsReload.Read().Enabled && !ttsReload.Read().TtsEnabled && ttsReload.Read().TtsVoiceMap is null or { Count: 0 } && ttsReload.LoadError != null, "corrupt config still fails closed with TTS defaults off");
+
 // Exercise the actual companion process, security middleware, endpoints and EOF lifecycle.
 string browserToken = new('b', 48), internalToken = new('i', 48);
 var panelDll = Path.Combine(AppContext.BaseDirectory, "SWYF.CustomAI.Panel.dll");
@@ -166,6 +224,13 @@ Check((await client.PostAsJsonAsync("/api/test", form)).IsSuccessStatusCode, "co
 Check((await client.PostAsJsonAsync("/api/test", form with { BaseUrl = url + "/wrong-schema" })).StatusCode == HttpStatusCode.BadGateway, "test rejects invalid gameplay schema");
 Check((await client.PostAsJsonAsync("/api/test", form with { BaseUrl = url + "/bad-objectives" })).StatusCode == HttpStatusCode.BadGateway, "test rejects non-string completed objectives");
 Check((await client.GetStringAsync("/api/config")).Contains("/v1"), "test does not save draft settings");
+var ttsForm = form with { TtsEnabled = true, TtsBaseUrl = url + "/tts", TtsModel = "voice-model", TtsVoice = "default-voice", TtsApiKey = "tts-http-secret", TtsSpeed = 1.5, TtsVoiceMap = new() { ["voice/player"] = "alloy" } };
+Check((await client.PutAsJsonAsync("/api/config", ttsForm)).IsSuccessStatusCode, "save endpoint accepts custom TTS settings");
+var ttsDocument = await client.GetFromJsonAsync<JsonObject>("/api/config");
+Check(ttsDocument!["ttsEnabled"]!.GetValue<bool>() && ttsDocument["ttsBaseUrl"]!.GetValue<string>() == url + "/tts" && ttsDocument["ttsSpeed"]!.GetValue<double>() == 1.5 &&
+    ttsDocument["ttsVoiceMap"]!["voice/player"]!.GetValue<string>() == "alloy" && ttsDocument["hasTtsApiKey"]!.GetValue<bool>() && ttsDocument["ttsApiKey"] is null, "config PUT saves and GET returns the whole TTS document");
+Check(!(await client.GetStringAsync("/api/config")).Contains("tts-http-secret") && !(await client.GetStringAsync("/api/config")).Contains("saved-secret"), "HTTP config masks both API keys");
+Check((await client.PutAsJsonAsync("/api/config", form with { ClearTtsApiKey = true })).IsSuccessStatusCode && !(await client.GetFromJsonAsync<JsonObject>("/api/config"))!["ttsEnabled"]!.GetValue<bool>(), "saving a form without TTS fields turns custom TTS back off");
 client.DefaultRequestHeaders.Remove("X-CustomAI-Token"); client.DefaultRequestHeaders.Add("X-CustomAI-Token", internalToken);
 Check((await client.GetFromJsonAsync<JsonObject>("/internal/status"))!["state"]!.GetValue<string>() == "success", "game status reflects saved provider test");
 Check((await client.PostAsJsonAsync("/internal/chat/completions", input)).IsSuccessStatusCode, "internal request forwarded");
