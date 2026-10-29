@@ -23,6 +23,10 @@ namespace Swyf.CustomAI
         private static Runtime? instance;
         private static string ModDirectory => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(typeof(Runtime).Assembly.Location)!, "..", "..", "CustomAI"));
         private static string ConfigPath => Path.Combine(ModDirectory, "settings.json");
+        // Panel reachability view for the custom voice runtime; same conditions TryComplete requires.
+        internal static bool PanelReady => instance != null && instance.url.Length > 0 && instance.helper != null && !instance.helper.HasExited;
+        internal static string PanelUrl => instance == null ? "" : instance.url;
+        internal static string PanelToken => instance == null ? "" : instance.internalToken;
         private readonly ConcurrentQueue<string> messages = new ConcurrentQueue<string>();
         private Process? helper;
         private string internalToken = "", browserToken = "", url = "";
@@ -32,6 +36,7 @@ namespace Swyf.CustomAI
         private JObject? connectionStatus;
         private float nextStatusPoll;
         private bool pollingStatus;
+        private float nextTtsRefresh;
         private static bool ReadEnabled()
         {
             try
@@ -115,6 +120,8 @@ namespace Swyf.CustomAI
 
         private void Update()
         {
+            // Keep the cached custom-voice flag in step with the settings file the panel writes.
+            if (Time.realtimeSinceStartup >= nextTtsRefresh) { nextTtsRefresh = Time.realtimeSinceStartup + 1f; ReadTtsEnabled(); }
             while (messages.TryDequeue(out var message))
             {
                 try
@@ -237,6 +244,27 @@ namespace Swyf.CustomAI
             { result = UniTask.FromException<JObject>(new IOException("The custom AI panel is unavailable; press F8 to reopen it.")); return true; }
             result = instance.Complete(body, cancellation, background);
             return true;
+        }
+
+        // Installer gates for the custom voice path (custom-ai/docs/tts-integration-notes.md §9.11). Returning false
+        // means the untouched game Speak/SpeakTracked bodies run. The decision is synchronous and side-effect-free,
+        // and the panel is already bootstrapped by TryComplete before any caller speech can happen.
+        public static bool TrySpeak(string text, string voicePath, uint callNetId) => TtsRuntime.TrySpeak(text, voicePath, callNetId);
+
+        public static bool TrySpeakTracked(string text, string voicePath, uint callNetId, uint completionToken) => TtsRuntime.TrySpeakTracked(text, voicePath, callNetId, completionToken);
+
+        // Refresh the cached ttsEnabled flag. Opt-in like the panel schema: a missing file or key keeps it false.
+        public static void ReadTtsEnabled() => TtsRuntime.Enabled = ReadTtsFlag();
+
+        private static bool ReadTtsFlag()
+        {
+            try
+            {
+                if (!File.Exists(ConfigPath)) return false;
+                var value = JObject.Parse(File.ReadAllText(ConfigPath))["ttsEnabled"];
+                return value != null && value.Type == JTokenType.Boolean && value.Value<bool>();
+            }
+            catch { return false; }
         }
 
         public static void PrepareConversation(object options)

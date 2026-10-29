@@ -3,6 +3,6 @@
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <Reference Include="SWYF.CustomAI.Bridge"><HintPath>../../src/Bridge/bin/Release/net471/SWYF.CustomAI.Bridge.dll</HintPath></Reference>
-    <Reference Include="UnityEngine.CoreModule;Mirror;Unity.InputSystem;UniTask"><HintPath>$(GameManaged)\%(Identity).dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule;Mirror;Unity.InputSystem;UniTask;PocketTTS"><HintPath>$(GameManaged)\%(Identity).dll</HintPath><Private>true</Private></Reference>
   </ItemGroup>
 </Project>
