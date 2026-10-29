@@ -65,6 +65,11 @@ public static class Compatibility
             var setter = Method(options, "set_GameplayRoute", "System.Void", "System.String");
             if (!setter.IsPublic) Fail("GameplayRoute must have a public setter.");
         }
+        // The custom voice gates prepend to both static caller-speech entries (§9.11): guard-free bodies with
+        // the exact parameter lists the injected Bridge calls are spelled against.
+        var voice = Type(ai, "PocketTtsSingleton");
+        StaticMethod(voice, "Speak", "System.Void", "System.String", "System.String", "System.UInt32", "System.String", "System.Boolean");
+        StaticMethod(voice, "SpeakTracked", "System.Void", "System.String", "System.String", "System.UInt32", "System.UInt32", "System.String");
 
         foreach (var name in new[] { "MainMenuToolkitController", "PauseMenuToolkitController" })
         {
@@ -88,9 +93,15 @@ public static class Compatibility
     private static TypeDefinition Type(AssemblyDefinition assembly, string name) =>
         assembly.MainModule.Types.SingleOrDefault(t => t.FullName == name) ?? throw new InvalidOperationException($"Incompatible game update: missing {name}.");
 
-    private static MethodDefinition Method(TypeDefinition type, string name, string returns, params string[] parameters)
+    private static MethodDefinition Method(TypeDefinition type, string name, string returns, params string[] parameters) =>
+        Method(type, name, returns, false, parameters);
+
+    private static MethodDefinition StaticMethod(TypeDefinition type, string name, string returns, params string[] parameters) =>
+        Method(type, name, returns, true, parameters);
+
+    private static MethodDefinition Method(TypeDefinition type, string name, string returns, bool isStatic, params string[] parameters)
     {
-        var methods = type.Methods.Where(m => m.Name == name && !m.IsStatic && !m.HasGenericParameters && m.ReturnType.FullName == returns &&
+        var methods = type.Methods.Where(m => m.Name == name && m.IsStatic == isStatic && !m.HasGenericParameters && m.ReturnType.FullName == returns &&
             m.Parameters.Select(p => p.ParameterType.FullName).SequenceEqual(parameters)).ToArray();
         if (methods.Length != 1) Fail($"The {type.Name}.{name} method signature has changed.");
         var method = methods[0];

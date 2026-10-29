@@ -17,6 +17,7 @@ public static class Program
 {
     private static readonly string[] GameFiles = ["Assembly-CSharp.dll", "ScriptsAssDef.dll"];
     private const string BridgeName = "SWYF.CustomAI.Bridge.dll";
+    public const int CustomVoiceGateCount = 2; // Speak + SpeakTracked gates in Assembly-CSharp.dll.
     public static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
 
     public static int Main(string[] args)
@@ -43,7 +44,7 @@ public static class Program
                 Process.GetProcessesByName("SWYF.CustomAI.Panel").Length > 0))
                 throw new InvalidOperationException("Close the game first.");
             Manifest? manifest = File.Exists(manifestPath) ? JsonSerializer.Deserialize<Manifest>(File.ReadAllText(manifestPath)) : null;
-            if (manifest != null && (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8) || manifest.Files == null || manifest.Files.Length != 2 ||
+            if (manifest != null && (manifest.Version is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9) || manifest.Files == null || manifest.Files.Length != 2 ||
                 manifest.Files.Any(x => x == null || !GameFiles.Contains(x.Name) || !ValidHash(x.OriginalHash) || !ValidHash(x.PatchedHash)) ||
                 manifest.Files.Select(x => x.Name).Distinct().Count() != 2))
                 throw new InvalidOperationException("Invalid installation manifest.");
@@ -75,7 +76,7 @@ public static class Program
             // Select the current clean files (or verified backups for files still carrying our patch).
             var sources = new Dictionary<string, string>();
             var observedHashes = new Dictionary<string, string>();
-            bool needsRepair = manifest == null || manifest.Version < 8;
+            bool needsRepair = manifest == null || manifest.Version < 9;
             foreach (var name in GameFiles)
             {
                 var live = Path.Combine(managed, name);
@@ -85,7 +86,7 @@ public static class Program
                 {
                     var backup = Backup(record); RequireHash(backup, record.OriginalHash);
                     sources[name] = backup;
-                    VerifyPatched(live, name == "ScriptsAssDef.dll" ? (manifest!.Version == 1 ? 2 : 3) : (manifest!.Version == 4 ? 4 : manifest.Version >= 7 ? CurrentAiHookCount(live, manifest.Version >= 8) : 2),
+                    VerifyPatched(live, name == "ScriptsAssDef.dll" ? (manifest!.Version == 1 ? 2 : 3) : (manifest!.Version == 4 ? 4 : manifest.Version >= 7 ? CurrentAiHookCount(live, manifest.Version >= 8, manifest.Version >= 9) : 2),
                         manifest.Version == 5 ? "ConfigureBackend" : manifest.Version >= 6 ? "EnsureInitialized" : null);
                 }
                 else { Compatibility.RequireUnpatched(live); sources[name] = live; needsRepair = true; }
@@ -135,7 +136,7 @@ public static class Program
                 AtomicCopy(bridge, Path.Combine(managed, BridgeName));
                 foreach (var name in GameFiles) AtomicCopy(Path.Combine(stage, name), Path.Combine(managed, name));
                 File.Delete(legacyConfig);
-                var installed = new Manifest(8, records.ToArray()) { Extra = manifest?.Extra };
+                var installed = new Manifest(9, records.ToArray()) { Extra = manifest?.Extra };
                 File.WriteAllText(manifestPath + ".tmp", JsonSerializer.Serialize(installed, new JsonSerializerOptions { WriteIndented = true }));
                 File.Move(manifestPath + ".tmp", manifestPath, true);
             }
@@ -221,6 +222,36 @@ public static class Program
                 freezeIl.InsertBefore(start, freezeIl.Create(OpCodes.Ldarg_1));
                 freezeIl.InsertBefore(start, freezeIl.Create(OpCodes.Call, Import("PrepareConversation")));
             }
+            // Custom voice gates for the TTS shim (custom-ai/docs/tts-integration-notes.md §9.11 item 11). The gate
+            // pushes the entry's original arguments verbatim and calls the static bridge entry; true returns with
+            // the request handled, false branches back into the completely untouched shipped body, so the runtime
+            // flag alone decides when custom voice is off. Fillers are declined by the gate itself (false).
+            var voice = module.Types.Single(t => t.FullName == "PocketTtsSingleton");
+            var speak = voice.Methods.Single(m => m.Name == "Speak" && m.Parameters.Count == 5);
+            ExpandBranches(speak);
+            if (!speak.IsStatic || speak.ReturnType.FullName != "System.Void" || speak.Body.HasExceptionHandlers ||
+                speak.Parameters[0].ParameterType.FullName != "System.String" || speak.Parameters[1].ParameterType.FullName != "System.String" ||
+                speak.Parameters[2].ParameterType.FullName != "System.UInt32" || speak.Parameters[3].ParameterType.FullName != "System.String" ||
+                speak.Parameters[4].ParameterType.FullName != "System.Boolean")
+                throw new InvalidOperationException("The caller voice entry signature has changed.");
+            var speakIl = speak.Body.GetILProcessor(); var speakStart = speak.Body.Instructions[0];
+            foreach (var instruction in new[] {
+                speakIl.Create(OpCodes.Ldarg_0), speakIl.Create(OpCodes.Ldarg_1), speakIl.Create(OpCodes.Ldarg_2), speakIl.Create(OpCodes.Ldarg_3),
+                speakIl.Create(OpCodes.Ldarg_S, speak.Parameters[4]), speakIl.Create(OpCodes.Call, Import("TrySpeak")),
+                speakIl.Create(OpCodes.Brfalse, speakStart), speakIl.Create(OpCodes.Ret) }) speakIl.InsertBefore(speakStart, instruction);
+            var tracked = voice.Methods.Single(m => m.Name == "SpeakTracked" && m.Parameters.Count == 5);
+            ExpandBranches(tracked);
+            if (!tracked.IsStatic || tracked.ReturnType.FullName != "System.Void" || tracked.Body.HasExceptionHandlers ||
+                tracked.Parameters[0].ParameterType.FullName != "System.String" || tracked.Parameters[1].ParameterType.FullName != "System.String" ||
+                tracked.Parameters[2].ParameterType.FullName != "System.UInt32" || tracked.Parameters[3].ParameterType.FullName != "System.UInt32" ||
+                tracked.Parameters[4].ParameterType.FullName != "System.String")
+                throw new InvalidOperationException("The tracked caller voice entry signature has changed.");
+            var trackedIl = tracked.Body.GetILProcessor(); var trackedStart = tracked.Body.Instructions[0];
+            // Vanilla SpeakTracked never enqueues fillers, so the tracked gate passes isFiller = false.
+            foreach (var instruction in new[] {
+                trackedIl.Create(OpCodes.Ldarg_0), trackedIl.Create(OpCodes.Ldarg_1), trackedIl.Create(OpCodes.Ldarg_2), trackedIl.Create(OpCodes.Ldarg_3),
+                trackedIl.Create(OpCodes.Ldarg_S, tracked.Parameters[4]), trackedIl.Create(OpCodes.Ldc_I4_0), trackedIl.Create(OpCodes.Call, Import("TrySpeakTracked")),
+                trackedIl.Create(OpCodes.Brfalse, trackedStart), trackedIl.Create(OpCodes.Ret) }) trackedIl.InsertBefore(trackedStart, instruction);
         }
         else
         {
@@ -245,11 +276,13 @@ public static class Program
         assembly.Write(output);
     }
 
-    private static int CurrentAiHookCount(string path, bool includeGameEntry = true)
+    private static int CurrentAiHookCount(string path, bool includeGameEntry = true, bool includeCustomVoice = true)
     {
         using var assembly = AssemblyDefinition.ReadAssembly(path);
         return (assembly.MainModule.Types.Single(t => t.Name == "AIConversation").Methods.Any(m => m.Name == "FreezePromptAsync") ? 3 : 2) +
-            (includeGameEntry && GameEntry.Getter(assembly) != null ? 1 : 0);
+            (includeGameEntry && GameEntry.Getter(assembly) != null ? 1 : 0) +
+            // v9+ Assembly-CSharp always carries the two unconditional custom voice gates.
+            (includeCustomVoice ? CustomVoiceGateCount : 0);
     }
 
     public static void VerifyPatched(string path, int expected, string? startupHook = null)

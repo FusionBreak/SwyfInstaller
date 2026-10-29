@@ -400,6 +400,7 @@ void CheckStandardHooks(string message)
         !assembly.MainModule.GetMemberReferences().Any(m => m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name is "ConfigureBackend" or "SkipAuth"), message);
 }
 CheckStandardHooks("new installation preserves backend authentication and initializes the custom provider");
+VoiceGateTests.Run(legacyAssemblyPath, Check);
 // Recreate the withdrawn test layouts only in disposable copies and migrate from verified backups.
 foreach (var legacyVersion in new[] { 4, 5, 7 })
 {
@@ -462,10 +463,11 @@ foreach (var legacyVersion in new[] { 4, 5, 7 })
     File.WriteAllText(gameConfig, "disable_kolkata_api = true\n");
     Check(Installer.Main(["install", game, dist]) == 0 && Installer.Main(["verify", game]) == 0, $"version {legacyVersion} test installation migrates to current hooks");
     var migratedManifest = JsonNode.Parse(File.ReadAllText(legacyManifestPath))!;
-    Check(migratedManifest["Version"]!.GetValue<int>() == 8 && migratedManifest["LegacyMetadata"]?["mode"]?.GetValue<string>() == "preserved" &&
+    Check(migratedManifest["Version"]!.GetValue<int>() == 9 && migratedManifest["LegacyMetadata"]?["mode"]?.GetValue<string>() == "preserved" &&
         !File.Exists(gameConfig) && File.ReadAllText(privateSettings) == privateSettingsText,
         $"version {legacyVersion} migration removes obsolete config and preserves private settings and manifest metadata");
     CheckStandardHooks($"version {legacyVersion} migration preserves backend authentication state");
+    VoiceGateTests.Run(legacyAssemblyPath, Check);
     GameEntryTests.Run(legacyAssemblyPath, Check);
 }
 File.WriteAllText(gameConfig, "obsolete test configuration");
@@ -562,6 +564,127 @@ if (hasEntryGate)
         "changed Steam entry contract is rejected before live files are patched");
 }
 }
+// Offline installer check: patch the clean shipping assemblies in a disposable scratch copy only. Runnable on
+// Linux together with --provider-only; the live game directory is read but never written.
+if (args.Contains("--installer-offline"))
+{
+    var offlineGame = Path.Combine(output, "offline-game");
+    var offlineManaged = Path.Combine(offlineGame, "Scam With Your Friends_Data", "Managed");
+    Directory.CreateDirectory(offlineManaged);
+    var offlineRealManaged = Path.Combine(Environment.GetEnvironmentVariable("SWYF_GAME_DIR") ?? throw new InvalidOperationException("Set SWYF_GAME_DIR to your game installation folder."), "Scam With Your Friends_Data", "Managed");
+    foreach (var library in Directory.GetFiles(offlineRealManaged, "*.dll").Where(p => Path.GetFileName(p) is not ("Assembly-CSharp.dll" or "ScriptsAssDef.dll" or "SWYF.CustomAI.Bridge.dll")))
+        File.Copy(library, Path.Combine(offlineManaged, Path.GetFileName(library)));
+    var offlineMod = Path.GetFullPath(Path.Combine(offlineRealManaged, "../../CustomAI"));
+    var offlineManifestPathOnDisk = Path.Combine(offlineMod, "manifest.json");
+    var liveManifest = File.Exists(offlineManifestPathOnDisk) ? JsonSerializer.Deserialize<Swyf.CustomAI.Installation.Manifest>(File.ReadAllText(offlineManifestPathOnDisk)) : null;
+    var cleanSources = new Dictionary<string, string>();
+    foreach (var name in new[] { "Assembly-CSharp.dll", "ScriptsAssDef.dll" })
+    {
+        var live = Path.Combine(offlineRealManaged, name);
+        var record = liveManifest?.Files.Single(x => x.Name == name);
+        var source = record != null && Installer.Hash(live) == record.PatchedHash
+            ? liveManifest!.Version < 3 ? Path.Combine(offlineMod, "backup", name) : Path.Combine(offlineMod, "backup", record.OriginalHash, name)
+            : live;
+        cleanSources[name] = source;
+        File.Copy(source, Path.Combine(offlineManaged, name));
+    }
+    var cleanAiHash = Installer.Hash(cleanSources["Assembly-CSharp.dll"]);
+    var offlineBridge = new[] { Path.Combine(root, "dist", "bridge", "SWYF.CustomAI.Bridge.dll"), Path.Combine(root, "src", "Bridge", "bin", "Release", "net471", "SWYF.CustomAI.Bridge.dll") }
+        .FirstOrDefault(File.Exists) ?? throw new InvalidOperationException("Build the bridge before running the offline installer check.");
+    var offlinePackage = Path.Combine(output, "offline-package");
+    Directory.CreateDirectory(Path.Combine(offlinePackage, "bridge"));
+    File.Copy(offlineBridge, Path.Combine(offlinePackage, "bridge", "SWYF.CustomAI.Bridge.dll"), true);
+    Directory.CreateDirectory(Path.Combine(offlinePackage, "panel"));
+    File.WriteAllText(Path.Combine(offlinePackage, "panel", "SWYF.CustomAI.Panel.exe"), "test presence marker; never executed");
+    var offlineAssembly = Path.Combine(offlineManaged, "Assembly-CSharp.dll");
+    var offlineManifest = Path.Combine(offlineGame, "CustomAI", "manifest.json");
+    Check(Installer.Main(["install", offlineGame, offlinePackage]) == 0 && File.Exists(offlineManifest), "offline installation patches the clean shipping assemblies");
+    var offlineDocument = JsonSerializer.Deserialize<Swyf.CustomAI.Installation.Manifest>(File.ReadAllText(offlineManifest))!;
+    Check(offlineDocument.Version == 9 && offlineDocument.Files.Single(f => f.Name == "Assembly-CSharp.dll").OriginalHash == cleanAiHash,
+        "offline installation writes the v9 manifest and backs up the clean assembly");
+    VoiceGateTests.Run(offlineAssembly, Check);
+    int CurrentAiHooks(string file)
+    {
+        using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(file);
+        return (assembly.MainModule.Types.Single(t => t.Name == "AIConversation").Methods.Any(m => m.Name == "FreezePromptAsync") ? 3 : 2) +
+            (assembly.MainModule.Types.Single(t => t.Name == "KolkataApi").Methods.Any(m => m.Name == "get_CanStartGame") ? 1 : 0);
+    }
+    bool HookVerificationFails(string file, int expected)
+    { try { Installer.VerifyPatched(file, expected); return false; } catch (InvalidOperationException) { return true; } }
+    var expectedOfflineHooks = CurrentAiHooks(cleanSources["Assembly-CSharp.dll"]) + Installer.CustomVoiceGateCount;
+    Installer.VerifyPatched(offlineAssembly, expectedOfflineHooks, "EnsureInitialized");
+    Check(HookVerificationFails(offlineAssembly, expectedOfflineHooks - 1) && HookVerificationFails(offlineAssembly, expectedOfflineHooks + 1),
+        "hook verification counts both custom voice gates exactly and rejects any other total");
+    var halfInstalled = Path.Combine(output, "half-installed-Assembly-CSharp.dll");
+    using (var resolver = new Mono.Cecil.DefaultAssemblyResolver())
+    {
+        resolver.AddSearchDirectory(offlineManaged);
+        using var half = Mono.Cecil.AssemblyDefinition.ReadAssembly(offlineAssembly, new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
+        var gate = half.MainModule.Types.Single(t => t.Name == "PocketTtsSingleton").Methods.Single(m => m.Name == "Speak" && m.Parameters.Count == 5);
+        while (gate.Body.Instructions[0].OpCode != Mono.Cecil.Cil.OpCodes.Ret) gate.Body.Instructions.RemoveAt(0);
+        gate.Body.Instructions.RemoveAt(0); // The first ret of a patched entry is always the gate return.
+        half.Write(halfInstalled);
+    }
+    Check(HookVerificationFails(halfInstalled, expectedOfflineHooks), "stripping one voice gate fails the full hook verification");
+    var firstOfflineInstall = Installer.Hash(offlineAssembly);
+    Check(Installer.Main(["install", offlineGame, offlinePackage]) == 0 && Installer.Hash(offlineAssembly) == firstOfflineInstall &&
+        Installer.Main(["verify", offlineGame]) == 0, "reinstalling from the verified backup adds no second voice gate");
+    VoiceGateTests.Run(offlineAssembly, Check);
+    try
+    {
+        Installer.Patch(offlineAssembly, Path.Combine(output, "double-patched-Assembly-CSharp.dll"), offlineBridge, offlineManaged);
+        throw new Exception("A patched assembly was patched a second time.");
+    }
+    catch (InvalidOperationException) { Check(true, "patching an already patched assembly is refused outright"); }
+    // v8 to v9 repair, recreated on the disposable copy: strip both gate prefixes and stamp the manifest back.
+    int OfflineRuntimeCalls(string file)
+    {
+        using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(file);
+        return assembly.MainModule.Types.SelectMany(t => t.Methods).Where(m => m.HasBody).SelectMany(m => m.Body.Instructions)
+            .Count(i => i.OpCode == Mono.Cecil.Cil.OpCodes.Call && i.Operand is Mono.Cecil.MethodReference r && r.DeclaringType.FullName == "Swyf.CustomAI.Runtime");
+    }
+    using (var resolver = new Mono.Cecil.DefaultAssemblyResolver())
+    {
+        resolver.AddSearchDirectory(offlineManaged);
+        using var v8sim = Mono.Cecil.AssemblyDefinition.ReadAssembly(offlineAssembly, new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
+        foreach (var (voiceEntry, gateName) in new[] { ("Speak", "TrySpeak"), ("SpeakTracked", "TrySpeakTracked") })
+        {
+            var voiceMethod = v8sim.MainModule.Types.Single(t => t.Name == "PocketTtsSingleton").Methods.Single(m => m.Name == voiceEntry && m.IsStatic && m.Parameters.Count == 5);
+            var gateCall = voiceMethod.Body.Instructions.First(i => i.OpCode == Mono.Cecil.Cil.OpCodes.Call && i.Operand is Mono.Cecil.MethodReference r && r.Name == gateName);
+            var gateLength = voiceMethod.Body.Instructions.IndexOf(gateCall) + 3; // Argument pushes plus call, brfalse and ret.
+            for (var i = 0; i < gateLength; i++) voiceMethod.Body.Instructions.RemoveAt(0);
+        }
+        v8sim.Write(offlineAssembly + ".v8sim");
+    }
+    File.Move(offlineAssembly + ".v8sim", offlineAssembly, true);
+    var offlineV8 = JsonNode.Parse(File.ReadAllText(offlineManifest))!;
+    offlineV8["Version"] = 8;
+    offlineV8["Files"]!.AsArray().Single(f => f!["Name"]!.GetValue<string>() == "Assembly-CSharp.dll")!["PatchedHash"] = Installer.Hash(offlineAssembly);
+    File.WriteAllText(offlineManifest, offlineV8.ToJsonString());
+    Check(Installer.Main(["verify", offlineGame]) == 0 && JsonNode.Parse(File.ReadAllText(offlineManifest))!["Version"]!.GetValue<int>() == 8,
+        "a version 8 installation verifies while waiting for the repair install");
+    Check(Installer.Main(["install", offlineGame, offlinePackage]) == 0 && JsonNode.Parse(File.ReadAllText(offlineManifest))!["Version"]!.GetValue<int>() == 9 &&
+        OfflineRuntimeCalls(offlineAssembly) == expectedOfflineHooks, "a version 8 installation is repaired into the version 9 custom voice gates");
+    Check(Installer.Main(["uninstall", offlineGame]) == 0 && Installer.Hash(offlineAssembly) == cleanAiHash,
+        "uninstall restores the clean assembly from the backup and removes both voice gates");
+    foreach (var contractEntry in new[] { "Speak", "SpeakTracked" })
+    {
+        using (var resolver = new Mono.Cecil.DefaultAssemblyResolver())
+        {
+            resolver.AddSearchDirectory(offlineManaged);
+            using var broken = Mono.Cecil.AssemblyDefinition.ReadAssembly(cleanSources["Assembly-CSharp.dll"], new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
+            broken.MainModule.Types.Single(t => t.Name == "PocketTtsSingleton").Methods.Single(m => m.Name == contractEntry && m.Parameters.Count == 5).Name = "ChangedVoiceContract";
+            broken.Write(offlineAssembly + ".contract-broken");
+        }
+        File.Move(offlineAssembly + ".contract-broken", offlineAssembly, true);
+        var rejectedHash = Installer.Hash(offlineAssembly);
+        var rejectedAssDefHash = Installer.Hash(Path.Combine(offlineManaged, "ScriptsAssDef.dll"));
+        Check(Installer.Main(["install", offlineGame, offlinePackage]) != 0 && Installer.Hash(offlineAssembly) == rejectedHash &&
+            Installer.Hash(Path.Combine(offlineManaged, "ScriptsAssDef.dll")) == rejectedAssDefHash && !File.Exists(offlineManifest),
+            $"a renamed voice entry {contractEntry} is rejected before either live assembly changes");
+    }
+}
+
 if (args.Contains("--live"))
 {
     var livePath = Path.Combine(Environment.GetEnvironmentVariable("SWYF_GAME_DIR") ?? throw new InvalidOperationException("Set SWYF_GAME_DIR to your game installation folder."), "CustomAI", "settings.json");
