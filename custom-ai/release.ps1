@@ -57,7 +57,7 @@ try {
     & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests/prerequisites.test.ps1
     if ($LASTEXITCODE -ne 0) { throw 'Prerequisite setup tests failed; nothing was published.' }
     $env:SWYF_GAME_DIR = $GameDir
-    dotnet run --project tests/Tests.csproj -c Release
+    dotnet run --project tests/Tests.csproj -c Release -- --installer-offline
     if ($LASTEXITCODE -ne 0) { throw 'Release tests failed; nothing was published.' }
     node tests/signin-ui.test.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Sign-in UI tests failed; nothing was published.' }

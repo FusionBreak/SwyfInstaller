@@ -227,7 +227,7 @@ public static class Program
             // the request handled, false branches back into the completely untouched shipped body, so the runtime
             // flag alone decides when custom voice is off. Fillers are declined by the gate itself (false).
             var voice = module.Types.Single(t => t.FullName == "PocketTtsSingleton");
-            var speak = voice.Methods.Single(m => m.Name == "Speak" && m.Parameters.Count == 5);
+            var speak = voice.Methods.Single(m => m.Name == "Speak" && m.IsStatic && m.Parameters.Count == 5);
             ExpandBranches(speak);
             if (!speak.IsStatic || speak.ReturnType.FullName != "System.Void" || speak.Body.HasExceptionHandlers ||
                 speak.Parameters[0].ParameterType.FullName != "System.String" || speak.Parameters[1].ParameterType.FullName != "System.String" ||
@@ -239,7 +239,7 @@ public static class Program
                 speakIl.Create(OpCodes.Ldarg_0), speakIl.Create(OpCodes.Ldarg_1), speakIl.Create(OpCodes.Ldarg_2), speakIl.Create(OpCodes.Ldarg_3),
                 speakIl.Create(OpCodes.Ldarg_S, speak.Parameters[4]), speakIl.Create(OpCodes.Call, Import("TrySpeak")),
                 speakIl.Create(OpCodes.Brfalse, speakStart), speakIl.Create(OpCodes.Ret) }) speakIl.InsertBefore(speakStart, instruction);
-            var tracked = voice.Methods.Single(m => m.Name == "SpeakTracked" && m.Parameters.Count == 5);
+            var tracked = voice.Methods.Single(m => m.Name == "SpeakTracked" && m.IsStatic && m.Parameters.Count == 5);
             ExpandBranches(tracked);
             if (!tracked.IsStatic || tracked.ReturnType.FullName != "System.Void" || tracked.Body.HasExceptionHandlers ||
                 tracked.Parameters[0].ParameterType.FullName != "System.String" || tracked.Parameters[1].ParameterType.FullName != "System.String" ||

@@ -348,6 +348,17 @@ var disabledStatus = await client.GetFromJsonAsync<JsonObject>("/internal/status
 Check(disabledStatus!["tts"]!["state"]!.GetValue<string>() == "disabled" && disabledStatus["tts"]!["lastError"] is null, "disabled custom TTS reports disabled state without error churn");
 panel.StandardInput.Close(); await panel.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(6)); Check(panel.ExitCode == 0, "helper shuts down on parent pipe EOF");
 
+// Removes the custom voice gate prefix the installer prepends (argument pushes plus call, brfalse and ret) from
+// the static five-parameter voice entry, leaving the shipped body untouched. Shared by the withdrawn pre-v9 layout
+// fixtures and the offline v8 repair simulation, which must both present the exact pre-gate instruction counts.
+void StripVoiceGate(Mono.Cecil.ModuleDefinition module, string entryName, string gateName)
+{
+    var voiceMethod = module.Types.Single(t => t.Name == "PocketTtsSingleton").Methods.Single(m => m.Name == entryName && m.IsStatic && m.Parameters.Count == 5);
+    var gateCall = voiceMethod.Body.Instructions.First(i => i.OpCode == Mono.Cecil.Cil.OpCodes.Call && i.Operand is Mono.Cecil.MethodReference r && r.Name == gateName);
+    var gateLength = voiceMethod.Body.Instructions.IndexOf(gateCall) + 3; // Argument pushes plus call, brfalse and ret.
+    for (var i = 0; i < gateLength; i++) voiceMethod.Body.Instructions.RemoveAt(0);
+}
+
 // Disposable copies only: real game remains untouched by this test.
 if (!args.Contains("--provider-only"))
 {
@@ -420,6 +431,10 @@ foreach (var legacyVersion in new[] { 4, 5, 7 })
         var freeze = module.Types.Single(t => t.Name == "AIConversation").Methods.SingleOrDefault(m => m.Name == "FreezePromptAsync");
         if (legacyVersion < 7 && freeze != null && freeze.Body.Instructions.Any(i => i.Operand is Mono.Cecil.MethodReference m && m.Name == "PrepareConversation"))
         { freeze.Body.Instructions.RemoveAt(0); freeze.Body.Instructions.RemoveAt(0); }
+        // Versions before 8 shipped no custom voice gates; strip the pair carved from the v9 assembly so
+        // the per-version hook verification counts match.
+        foreach (var (voiceEntry, gateName) in new[] { ("Speak", "TrySpeak"), ("SpeakTracked", "TrySpeakTracked") })
+            StripVoiceGate(module, voiceEntry, gateName);
         var awake = api.Methods.Single(m => m.Name == "Awake");
         var initialize = awake.Body.Instructions.Single(i => i.Operand is Mono.Cecil.MethodReference m && m.DeclaringType.FullName == "Swyf.CustomAI.Runtime" && m.Name == "EnsureInitialized");
         var runtime = ((Mono.Cecil.MethodReference)initialize.Operand).DeclaringType;
@@ -611,6 +626,12 @@ if (args.Contains("--installer-offline"))
     }
     bool HookVerificationFails(string file, int expected)
     { try { Installer.VerifyPatched(file, expected); return false; } catch (InvalidOperationException) { return true; } }
+    int OfflineRuntimeCalls(string file)
+    {
+        using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(file);
+        return assembly.MainModule.Types.SelectMany(t => t.Methods).Where(m => m.HasBody).SelectMany(m => m.Body.Instructions)
+            .Count(i => i.OpCode == Mono.Cecil.Cil.OpCodes.Call && i.Operand is Mono.Cecil.MethodReference r && r.DeclaringType.FullName == "Swyf.CustomAI.Runtime");
+    }
     var expectedOfflineHooks = CurrentAiHooks(cleanSources["Assembly-CSharp.dll"]) + Installer.CustomVoiceGateCount;
     Installer.VerifyPatched(offlineAssembly, expectedOfflineHooks, "EnsureInitialized");
     Check(HookVerificationFails(offlineAssembly, expectedOfflineHooks - 1) && HookVerificationFails(offlineAssembly, expectedOfflineHooks + 1),
@@ -626,6 +647,21 @@ if (args.Contains("--installer-offline"))
         half.Write(halfInstalled);
     }
     Check(HookVerificationFails(halfInstalled, expectedOfflineHooks), "stripping one voice gate fails the full hook verification");
+    // The shared helper the legacy migration fixtures use strips both gates from a scratch copy of the
+    // fresh v9 install: the runtime call count drops by exactly the gate count and v9 verification fails.
+    var strippedGates = Path.Combine(output, "gate-stripped-Assembly-CSharp.dll");
+    using (var resolver = new Mono.Cecil.DefaultAssemblyResolver())
+    {
+        resolver.AddSearchDirectory(offlineManaged);
+        using var stripped = Mono.Cecil.AssemblyDefinition.ReadAssembly(offlineAssembly, new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
+        foreach (var (voiceEntry, gateName) in new[] { ("Speak", "TrySpeak"), ("SpeakTracked", "TrySpeakTracked") })
+            StripVoiceGate(stripped.MainModule, voiceEntry, gateName);
+        stripped.Write(strippedGates);
+    }
+    Check(OfflineRuntimeCalls(strippedGates) == expectedOfflineHooks - Installer.CustomVoiceGateCount,
+        "the shared gate helper strips both voice gates leaving exactly the other patch hooks");
+    Check(HookVerificationFails(strippedGates, expectedOfflineHooks),
+        "hook verification fails when both voice gates are stripped below the v9 expected count");
     var firstOfflineInstall = Installer.Hash(offlineAssembly);
     Check(Installer.Main(["install", offlineGame, offlinePackage]) == 0 && Installer.Hash(offlineAssembly) == firstOfflineInstall &&
         Installer.Main(["verify", offlineGame]) == 0, "reinstalling from the verified backup adds no second voice gate");
@@ -636,24 +672,14 @@ if (args.Contains("--installer-offline"))
         throw new Exception("A patched assembly was patched a second time.");
     }
     catch (InvalidOperationException) { Check(true, "patching an already patched assembly is refused outright"); }
-    // v8 to v9 repair, recreated on the disposable copy: strip both gate prefixes and stamp the manifest back.
-    int OfflineRuntimeCalls(string file)
-    {
-        using var assembly = Mono.Cecil.AssemblyDefinition.ReadAssembly(file);
-        return assembly.MainModule.Types.SelectMany(t => t.Methods).Where(m => m.HasBody).SelectMany(m => m.Body.Instructions)
-            .Count(i => i.OpCode == Mono.Cecil.Cil.OpCodes.Call && i.Operand is Mono.Cecil.MethodReference r && r.DeclaringType.FullName == "Swyf.CustomAI.Runtime");
-    }
+    // v8 to v9 repair, recreated on the disposable copy: strip both gate prefixes with the shared helper
+    // and stamp the manifest back.
     using (var resolver = new Mono.Cecil.DefaultAssemblyResolver())
     {
         resolver.AddSearchDirectory(offlineManaged);
         using var v8sim = Mono.Cecil.AssemblyDefinition.ReadAssembly(offlineAssembly, new Mono.Cecil.ReaderParameters { AssemblyResolver = resolver });
         foreach (var (voiceEntry, gateName) in new[] { ("Speak", "TrySpeak"), ("SpeakTracked", "TrySpeakTracked") })
-        {
-            var voiceMethod = v8sim.MainModule.Types.Single(t => t.Name == "PocketTtsSingleton").Methods.Single(m => m.Name == voiceEntry && m.IsStatic && m.Parameters.Count == 5);
-            var gateCall = voiceMethod.Body.Instructions.First(i => i.OpCode == Mono.Cecil.Cil.OpCodes.Call && i.Operand is Mono.Cecil.MethodReference r && r.Name == gateName);
-            var gateLength = voiceMethod.Body.Instructions.IndexOf(gateCall) + 3; // Argument pushes plus call, brfalse and ret.
-            for (var i = 0; i < gateLength; i++) voiceMethod.Body.Instructions.RemoveAt(0);
-        }
+            StripVoiceGate(v8sim.MainModule, voiceEntry, gateName);
         v8sim.Write(offlineAssembly + ".v8sim");
     }
     File.Move(offlineAssembly + ".v8sim", offlineAssembly, true);
